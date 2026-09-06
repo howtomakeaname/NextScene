@@ -78,6 +78,12 @@ void TVPGetBlitPerf(uint64_t &calls, uint64_t &skipped, uint64_t &compare_us,
 extern "C" void TVPRegisterKrkrGLESPluginAnchor();
 extern "C" void TVPRegisterKrkrLive2DPluginAnchor();
 
+// A re-attached render target gets this many forced re-present ticks in
+// engine_tick. The embedder's buffer-queue geometry can land a few frames
+// after the attach call returns; one forced present could capture a stale
+// buffer. Mirrors kRenderTargetGraceFrames in ui_stubs.cpp.
+static constexpr int kRenderTargetRepresentTicks = 5;
+
 struct engine_handle_s {
   std::recursive_mutex mutex;
   std::string last_error;
@@ -139,6 +145,10 @@ struct engine_handle_s {
     krkr::AngleBackend angle_backend = krkr::AngleBackend::OpenGLES;
     bool iosurface_attached = false;
     bool native_window_attached = false;
+    // Render-target generation last observed by engine_tick, and how many
+    // forced re-present ticks remain for it (see engine_tick).
+    uint64_t seen_target_gen = 0;
+    int represent_ticks = 0;
   } render;
 
   struct StartupState {
@@ -1777,6 +1787,34 @@ engine_result_t engine_tick(engine_handle_t handle, uint32_t delta_ms) {
     ::Application->Run();
   }
   const auto perf_run_t1 = std::chrono::steady_clock::now();
+
+  // Re-present after a render-target change. A static scene (title screen
+  // with no animation) never invalidates its layers, so Run() delivers no
+  // tTVPWinUpdateEvent and BasicDrawDevice::Show() → UpdateDrawBuffer()
+  // never run. After the host re-attaches the native window (orientation
+  // change destroys/recreates the EGL window surface), the new surface's
+  // buffer queue then receives no frames at all: Flutter keeps showing
+  // the stale buffer (stretched) or goes black once the queue resize
+  // releases it. Drive Show() directly for a few ticks after the target
+  // generation changes — the generation check inside
+  // FlutterWindowLayer::UpdateDrawBuffer forces a full blit +
+  // MarkFrameDirty, and TVPDrawSceneOnce() below swaps it into the new
+  // queue.
+  {
+    auto& egl = krkr::GetEngineEGLContext();
+    if (egl.IsValid() && egl.HasNativeWindow()) {
+      const uint64_t gen = egl.GetRenderTargetGeneration();
+      if (gen != impl->render.seen_target_gen) {
+        impl->render.seen_target_gen = gen;
+        impl->render.represent_ticks = kRenderTargetRepresentTicks;
+      }
+      if (impl->render.represent_ticks > 0 && ::TVPMainWindow) {
+        --impl->render.represent_ticks;
+        ::TVPMainWindow->DeliverDrawDeviceShow();
+      }
+    }
+  }
+
   ::TVPDrawSceneOnce(0);
 
   // Process deferred texture deletions. iTVPTexture2D::Release() uses
