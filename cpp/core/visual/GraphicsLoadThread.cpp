@@ -14,6 +14,10 @@
 #include "BitmapBitsAlloc.h"
 #include "LayerIntf.h"
 #include "TVPDecodeArena.h"
+#include <spdlog/spdlog.h>
+
+// 遅延計測用の閾値(ms)。非同期画像読込みの停滞切り分けに使う
+static constexpr auto kAsyncLoadWarnThresholdMs = 200;
 
 tTVPTmpBitmapImage::tTVPTmpBitmapImage() : MetaInfo(nullptr) {}
 tTVPTmpBitmapImage::~tTVPTmpBitmapImage() {
@@ -128,6 +132,7 @@ void tTVPAsyncImageLoader::Proc(NativeEvent &ev) {
 }
 void tTVPAsyncImageLoader::HandleLoadedImage() {
     bool loading;
+    int drained = 0; // 1 回の NativeEvent で処理した画像数(バースト検出用)
     do {
         loading = false;
         tTVPImageLoadCommand *cmd = nullptr;
@@ -139,6 +144,8 @@ void tTVPAsyncImageLoader::HandleLoadedImage() {
                 loading = true;
             }
         }
+        if(cmd)
+            ++drained;
         if(cmd != nullptr) {
             cmd->bmp_->SetLoading(false);
             if(cmd->result_.length() > 0) {
@@ -197,6 +204,10 @@ void tTVPAsyncImageLoader::HandleLoadedImage() {
             delete cmd;
         }
     } while(loading);
+    if(drained > 3) {
+        spdlog::warn("async image load burst: {} images drained in one event",
+                     drained);
+    }
 }
 //---------------------------------------------------------------------------
 
@@ -255,6 +266,7 @@ void tTVPAsyncImageLoader::PushLoadQueue(iTJSDispatch2 *owner,
     cmd->path_ = nname;
     cmd->dest_ = new tTVPTmpBitmapImage();
     cmd->result_.Clear();
+    cmd->enqueued_ = std::chrono::steady_clock::now();
     {
         // キューをロックしてプッシュ
         tTJSCriticalSectionHolder cs(CommandQueueCS);
@@ -283,7 +295,21 @@ void tTVPAsyncImageLoader::LoadingThread() {
             }
             if(cmd) {
                 loading = true;
+                auto dequeue = std::chrono::steady_clock::now();
+                auto queue_wait_ms = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(dequeue - cmd->enqueued_)
+                                         .count();
                 LoadImageFromCommand(cmd);
+                auto load_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - dequeue)
+                                   .count();
+                if(queue_wait_ms > kAsyncLoadWarnThresholdMs ||
+                   load_ms > kAsyncLoadWarnThresholdMs) {
+                    spdlog::warn(
+                        "async image load slow: path={} queue_wait={}ms "
+                        "load={}ms",
+                        cmd->path_.AsStdString(), queue_wait_ms, load_ms);
+                }
                 { // Lock
                     tTJSCriticalSectionHolder cs(ImageQueueCS);
                     LoadedQueue.push(cmd);
