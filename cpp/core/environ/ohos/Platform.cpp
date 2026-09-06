@@ -21,6 +21,7 @@
 #include <dlfcn.h>
 #include <malloc.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -180,6 +181,12 @@ bool TVPCheckStartupPath(const std::string &path) { return true; }
 
 void TVPControlAdDialog(int adType, int arg1, int arg2) {}
 
+// Present-path diagnostics: eglSwapBuffers outcome counters, reset and
+// printed by the engine_tick perf report. Relaxed atomics — diagnostics
+// only; TVPForceSwapBuffer runs on the tick thread.
+std::atomic<uint64_t> g_perf_swap_ok{0};
+std::atomic<uint64_t> g_perf_swap_fail{0};
+
 void TVPForceSwapBuffer() {
     // Same semantics as android/AndroidUtils.cpp: only swap when an
     // OHNativeWindow-backed EGL surface is attached (Flutter SurfaceTexture
@@ -196,11 +203,16 @@ void TVPForceSwapBuffer() {
         const EGLBoolean ok =
             eglSwapBuffers(egl.GetDisplay(), egl.GetWindowSurface());
         if (ok != EGL_TRUE) {
-            OHOSLog(LOG_WARN,
-                    (std::string("TVPForceSwapBuffer: eglSwapBuffers failed "
-                                 "err=0x") +
-                     std::to_string(static_cast<int>(eglGetError())))
-                        .c_str());
+            g_perf_swap_fail.fetch_add(1, std::memory_order_relaxed);
+            const std::string msg =
+                "TVPForceSwapBuffer: eglSwapBuffers failed err=0x" +
+                std::to_string(static_cast<int>(eglGetError()));
+            // Mirror to the engine log — hilog's ring buffer may already
+            // have rotated past the window being diagnosed.
+            spdlog::warn(msg);
+            OHOSLog(LOG_WARN, msg.c_str());
+        } else {
+            g_perf_swap_ok.fetch_add(1, std::memory_order_relaxed);
         }
     }
     // In Pbuffer mode, swap is a no-op — engine_tick handles readback.

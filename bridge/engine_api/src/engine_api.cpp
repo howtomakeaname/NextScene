@@ -76,6 +76,11 @@ int TVPDrawSceneOnce(int interval);
 void TVPGetBlitPerf(uint64_t &calls, uint64_t &skipped, uint64_t &compare_us,
                     uint64_t &gl_us);
 
+// Fetch-and-clear frame-content probe (ui_stubs.cpp); false when no blit
+// ran since the previous call.
+bool TVPGetFrameProbe(uint64_t &n, uint64_t &lit, uint64_t &mean_r,
+                      uint64_t &mean_g, uint64_t &mean_b);
+
 extern "C" void TVPRegisterKrkrGLESPluginAnchor();
 extern "C" void TVPRegisterKrkrLive2DPluginAnchor();
 
@@ -84,6 +89,11 @@ extern "C" void TVPRegisterKrkrLive2DPluginAnchor();
 // after the attach call returns; one forced present could capture a stale
 // buffer. Mirrors kRenderTargetGraceFrames in ui_stubs.cpp.
 static constexpr int kRenderTargetRepresentTicks = 5;
+
+// Set once per session by engine_open_game; engine_tick's perf report dumps
+// the primary layer structure at the first fully-idle report window, then
+// latches this true.
+static bool s_layer_dump_done = false;
 
 struct engine_handle_s {
   std::recursive_mutex mutex;
@@ -719,6 +729,10 @@ engine_result_t OpenGameCore(engine_handle_t handle,
   // previous peak and entry-time resource loading stalls (root cause of the
   // same-process second-entry black screen).
   TVPLogNativeMemoryBreakdown("session_start");
+  // Re-arm the one-shot idle layer-structure dump (engine_tick) so every
+  // session — not only the first of the process — gets its steady-state
+  // layer tree logged.
+  s_layer_dump_done = false;
 
   try {
     spdlog::debug("engine_open_game: calling Application->StartApplication...");
@@ -1959,6 +1973,21 @@ engine_result_t engine_tick(engine_handle_t handle, uint32_t delta_ms) {
     }
     uint64_t ub_calls = 0, ub_skipped = 0, ub_cmp_us = 0, ub_gl_us = 0;
     TVPGetBlitPerf(ub_calls, ub_skipped, ub_cmp_us, ub_gl_us);
+    // Frame-content probe (ui_stubs.cpp): color statistics of what the
+    // blit path actually presented during this span.
+    uint64_t probe_n = 0, probe_lit = 0, probe_r = 0, probe_g = 0,
+             probe_b = 0;
+    const bool probe_valid =
+        TVPGetFrameProbe(probe_n, probe_lit, probe_r, probe_g, probe_b);
+#if defined(__OHOS__)
+    // Present-path swap outcome counters (ohos/Platform.cpp,
+    // TVPForceSwapBuffer).
+    extern std::atomic<uint64_t> g_perf_swap_ok, g_perf_swap_fail;
+    const uint64_t swap_ok = g_perf_swap_ok.exchange(0);
+    const uint64_t swap_fail = g_perf_swap_fail.exchange(0);
+#else
+    const uint64_t swap_ok = 0, swap_fail = 0;
+#endif
     // Application->Run() cost breakdown (defined in Application.cpp /
     // SystemControl.cpp; relaxed atomics, diagnostics only).
     extern std::atomic<uint64_t> g_perf_msg_us, g_perf_timer_us,
@@ -1992,7 +2021,7 @@ engine_result_t engine_tick(engine_handle_t handle, uint32_t delta_ms) {
     const uint64_t max_queue = g_perf_max_queue.exchange(0);
     // One-shot layer-structure dump on the first fully-idle report window
     // (120 composes, none dirty) past the earliest boot — the steady title.
-    static bool s_layer_dump_done = false;
+    // Re-armed per session by engine_open_game.
     if (!s_layer_dump_done && runs == 120 && impl->perf.dirty == 0 &&
         impl->tick_count > 360) {
       s_layer_dump_done = true;
@@ -2009,7 +2038,8 @@ engine_result_t engine_tick(engine_handle_t handle, uint32_t delta_ms) {
     }
     spdlog::info(
         "perf: span={:.2f}s run={:.1f}ms draw={:.1f}ms read={:.1f}ms "
-        "reads={} dirty={} ub={} skip={} cmp={:.1f}ms ubgl={:.1f}ms | "
+        "reads={} dirty={} ub={} skip={} cmp={:.1f}ms ubgl={:.1f}ms "
+        "fb={} swap={}/{} | "
         "brk: msg={:.1f}ms timer={:.1f}ms watch={:.1f}ms "
         "(deliver={:.1f}ms beat={:.1f}ms gov={:.1f}ms rehash={:.1f}ms) "
         "runs={} nev={} nie={} maxq={} idle={:.1f}ms cont={:.1f}ms "
@@ -2021,7 +2051,19 @@ engine_result_t engine_tick(engine_handle_t handle, uint32_t delta_ms) {
         static_cast<unsigned long long>(impl->perf.dirty),
         static_cast<unsigned long long>(ub_calls),
         static_cast<unsigned long long>(ub_skipped), ub_cmp_us / 1000.0,
-        ub_gl_us / 1000.0, msg_us / 1000.0, timer_us / 1000.0,
+        ub_gl_us / 1000.0,
+        // fb: mean RGB + lit fraction of the presented frame ("-"
+        // when no blit ran in this span); swap: ok/fail eglSwapBuffers
+        // counts (OHOS window-surface mode).
+        probe_valid
+            ? std::to_string(probe_r) + "," + std::to_string(probe_g) + "," +
+                  std::to_string(probe_b) + "," +
+                  std::to_string(probe_n ? probe_lit * 100 / probe_n : 0) +
+                  "%"
+            : std::string("-"),
+        static_cast<unsigned long long>(swap_ok),
+        static_cast<unsigned long long>(swap_fail),
+        msg_us / 1000.0, timer_us / 1000.0,
         watch_us / 1000.0, deliver_us / 1000.0, beat_us / 1000.0,
         gov_us / 1000.0, rehash_us / 1000.0,
         static_cast<unsigned long long>(runs),

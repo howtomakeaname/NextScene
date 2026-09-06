@@ -12,6 +12,8 @@
  */
 
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <string>
@@ -59,6 +61,34 @@ void TVPGetBlitPerf(uint64_t &calls, uint64_t &skipped, uint64_t &compare_us,
     gl_us = g_blitPerf.gl_us;
     // Fetch-and-clear: callers log these periodically.
     g_blitPerf = {};
+}
+
+// ---------------------------------------------------------------------------
+// Frame-content probe accumulators (see the probe inside
+// FlutterWindowLayer::UpdateDrawBuffer). Relaxed atomics — diagnostics only;
+// the probe and the reader both run on the tick thread.
+// ---------------------------------------------------------------------------
+static std::atomic<uint64_t> g_frame_probe_n{0};
+static std::atomic<uint64_t> g_frame_probe_lit{0};
+static std::atomic<uint64_t> g_frame_probe_rsum{0};
+static std::atomic<uint64_t> g_frame_probe_gsum{0};
+static std::atomic<uint64_t> g_frame_probe_bsum{0};
+
+bool TVPGetFrameProbe(uint64_t &n, uint64_t &lit, uint64_t &mean_r,
+                      uint64_t &mean_g, uint64_t &mean_b) {
+    n = g_frame_probe_n.exchange(0, std::memory_order_relaxed);
+    lit = g_frame_probe_lit.exchange(0, std::memory_order_relaxed);
+    const uint64_t rsum =
+        g_frame_probe_rsum.exchange(0, std::memory_order_relaxed);
+    const uint64_t gsum =
+        g_frame_probe_gsum.exchange(0, std::memory_order_relaxed);
+    const uint64_t bsum =
+        g_frame_probe_bsum.exchange(0, std::memory_order_relaxed);
+    if (n == 0) return false;
+    mean_r = rsum / n;
+    mean_g = gsum / n;
+    mean_b = bsum / n;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +515,48 @@ public:
             glFlush();
         } else {
             glFinish();
+        }
+
+        // ── Frame-content probe ────────────────────────────────────
+        // Read back the just-blitted target (defined content, pre-swap)
+        // at most once per ~2s and accumulate its color statistics. The
+        // engine_tick perf report prints them: they discriminate "the
+        // engine is presenting black content" (game state stalled) from
+        // "the engine presents normal content but the screen stays
+        // black" (present/consumer chain broken). glReadPixels blocks
+        // until the blit above completes, so the sample is coherent.
+        {
+            static std::chrono::steady_clock::time_point last_probe{};
+            static std::vector<uint8_t> probe_buf;
+            const auto probe_now = std::chrono::steady_clock::now();
+            if (last_probe == std::chrono::steady_clock::time_point{} ||
+                probe_now - last_probe >= std::chrono::seconds(2)) {
+                last_probe = probe_now;
+                const size_t need =
+                    static_cast<size_t>(fbW) * static_cast<size_t>(fbH) * 4;
+                if (probe_buf.size() < need) probe_buf.resize(need);
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glReadPixels(0, 0, static_cast<GLsizei>(fbW),
+                             static_cast<GLsizei>(fbH), GL_RGBA,
+                             GL_UNSIGNED_BYTE, probe_buf.data());
+                glPixelStorei(GL_PACK_ALIGNMENT, 4);
+                const size_t stride =
+                    std::max<size_t>(1, need / 4 / 65536) * 4;
+                uint64_t n = 0, lit = 0, rsum = 0, gsum = 0, bsum = 0;
+                for (size_t off = 0; off + 3 < need; off += stride) {
+                    const uint8_t r = probe_buf[off];
+                    const uint8_t g = probe_buf[off + 1];
+                    const uint8_t b = probe_buf[off + 2];
+                    rsum += r; gsum += g; bsum += b;
+                    if ((r * 299 + g * 587 + b * 114) / 1000 > 16) lit++;
+                    n++;
+                }
+                g_frame_probe_n.fetch_add(n, std::memory_order_relaxed);
+                g_frame_probe_lit.fetch_add(lit, std::memory_order_relaxed);
+                g_frame_probe_rsum.fetch_add(rsum, std::memory_order_relaxed);
+                g_frame_probe_gsum.fetch_add(gsum, std::memory_order_relaxed);
+                g_frame_probe_bsum.fetch_add(bsum, std::memory_order_relaxed);
+            }
         }
 
         // Mark the frame as dirty so TVPForceSwapBuffer() knows there is
