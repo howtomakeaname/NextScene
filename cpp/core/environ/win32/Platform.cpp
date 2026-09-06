@@ -34,6 +34,7 @@ tjs_int TVPGetSelfUsedMemory() {
 // the (mem) line's tracked/untracked split there.
 TVPNativeHeapStats TVPGetNativeHeapStats() { return { -1, -1 }; }
 void TVPPurgeNativeHeapForHost() {}
+void TVPDropSystemFontPagesForHost() {}
 void TVPLogNativeMemoryBreakdown(const char *tag) {
     spdlog::info("(memstat:{}) rss={}MB heap=unknown", tag,
                  TVPGetSelfUsedMemory());

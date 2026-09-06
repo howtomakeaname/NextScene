@@ -133,6 +133,11 @@ void TVPPurgeNativeHeapForHost() {
 #endif
 }
 
+void TVPDropSystemFontPagesForHost() {
+    // Measured and wired on OHOS only so far; desktop Linux has swap and
+    // no RSS governor breathing down the process.
+}
+
 void TVPLogNativeMemoryBreakdown(const char *tag) {
     char detail[160] = "";
 #if defined(__GLIBC__) && defined(__GLIBC_PREREQ) && __GLIBC_PREREQ(2, 33)
