@@ -432,13 +432,26 @@ static void _TVPDeliverEventByPrio(tjs_uint prio) {
         TVPEventQueue.erase(i);
 
         // event delivering
+        // Slow-delivery probe: a single handler that blocks the event pump
+        // for hundreds of ms stalls every window-update delivery behind it.
+        // The event name (onTimer / onClick / ...) says which script
+        // callback is responsible.
+        const auto deliver_t0 = std::chrono::steady_clock::now();
         try {
             e->Deliver();
         } catch(...) {
             delete e;
             throw;
         }
+        const std::string event_name = e->GetEventName().AsNarrowStdString();
         delete e;
+        const auto deliver_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - deliver_t0).count();
+        if(deliver_us > 100000) {
+            spdlog::warn("slow deliver: event=\"{}\" took={:.1f}ms",
+                         event_name, deliver_us / 1000.0);
+        }
         g_perf_n_events.fetch_add(1, std::memory_order_relaxed);
     }
 }
@@ -466,6 +479,7 @@ static bool _TVPDeliverAllEvents2() {
         TVPInputEventQueue.erase(i);
 
         // event delivering
+        const auto inpd_t0 = std::chrono::steady_clock::now();
         try {
             e->Deliver();
         } catch(...) {
@@ -473,6 +487,15 @@ static bool _TVPDeliverAllEvents2() {
             throw;
         }
         delete e;
+        {
+            const auto inpd_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - inpd_t0).count();
+            if(inpd_us > 100000) {
+                spdlog::warn("slow deliver: input event took={:.1f}ms",
+                             inpd_us / 1000.0);
+            }
+        }
         g_perf_n_inpevents.fetch_add(1, std::memory_order_relaxed);
 
         // check exclusive events
@@ -653,8 +676,17 @@ void TVPDeliverWindowUpdateEvents() {
 
     try {
         for(tjs_uint i = 0; i < TVPWinUpdateEventQueue.size(); i++) {
-            if(!TVPWinUpdateEventQueue[i].IsEmpty())
+            if(!TVPWinUpdateEventQueue[i].IsEmpty()) {
+                const auto wupd_t0 = std::chrono::steady_clock::now();
                 TVPWinUpdateEventQueue[i].Deliver();
+                const auto wupd_us =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - wupd_t0).count();
+                if(wupd_us > 100000) {
+                    spdlog::warn("slow deliver: window update took={:.1f}ms",
+                                 wupd_us / 1000.0);
+                }
+            }
         }
     } catch(...) {
         TVPWinUpdateEventQueue.clear();
