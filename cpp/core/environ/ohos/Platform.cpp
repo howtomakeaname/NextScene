@@ -148,6 +148,20 @@ void TVPPurgeNativeHeapForHost() {
     mallopt(M_FLUSH_THREAD_CACHE, 0);
 }
 
+void TVPDropSystemFontPagesForHost() {
+    // The memory governor tracks RSS; ~500MB of it after a few game
+    // sessions turned out to be the platform text stack's read-only mmaps
+    // of /system/fonts (same 20MB font resident two dozen times), which
+    // pushed session starts into kernel direct-reclaim stalls. The engine
+    // itself loads fonts via heap-backed streams — these mappings are not
+    // ours to unmap, but their pages are clean file pages, so dropping
+    // them is free.
+    unsigned long mappings = 0;
+    const unsigned long dropped_kb = TVPDropSystemFontPages(&mappings);
+    spdlog::info("dropped {}MB resident font pages ({} system-font mappings)",
+                 dropped_kb / 1024, mappings);
+}
+
 void TVPLogNativeMemoryBreakdown(const char *tag) {
     char detail[192] = "";
     OhosMallinfo2Fn mi2 = Mallinfo2Entry();

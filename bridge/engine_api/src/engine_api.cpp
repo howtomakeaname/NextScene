@@ -50,6 +50,7 @@ static constexpr unsigned int kEngineApiHilogDomain = 0x0206;
 #include "environ/MainScene.h"
 #include "base/StorageIntf.h"
 #include "base/ScriptMgnIntf.h"
+#include "base/XP3Archive.h"
 #include "base/SysInitIntf.h"
 #include "base/impl/SysInitImpl.h"
 #include "visual/GraphicsLoaderIntf.h"
@@ -1197,9 +1198,11 @@ engine_result_t engine_destroy(engine_handle_t handle) {
     // Teardown RSS ladder: each step logs RSS so the on-device log shows
     // exactly which stage fails to hand memory back (the same-process
     // second-session entry stall was caused by ~3.7GB surviving this path).
+    // spdlog, not AndroidInfoLog: only spdlog lines are mirrored into
+    // krkr2-engine.log on OHOS; hilog alone rotates too fast for forensics.
     const auto logTeardownStep = [](const char* step) {
-      AndroidInfoLog("engine_destroy[%s]: rss=%dMB free=%dMB", step,
-                     TVPGetSelfUsedMemory(), TVPGetSystemFreeMemory());
+      spdlog::info("engine_destroy[{}]: rss={}MB free={}MB", step,
+                   TVPGetSelfUsedMemory(), TVPGetSystemFreeMemory());
     };
     logTeardownStep("start");
     TVPLogNativeMemoryBreakdown("destroy_start");
@@ -1226,6 +1229,10 @@ engine_result_t engine_destroy(engine_handle_t handle) {
     }
     logTeardownStep("script_reset");
     try {
+      // XP3 segment cache first: its entries keep archive files mmapped, and
+      // those file-backed pages otherwise survive the teardown in RSS (the
+      // same-process switch-game cycle measured ~280MB retained this way).
+      TVPClearXP3SegmentCache();
       TVPClearGraphicCache();
       TVPResetStorageForHost();
       TVPResetAutoMountPathsForHost();
@@ -1264,6 +1271,11 @@ engine_result_t engine_destroy(engine_handle_t handle) {
     // session starts. Log the breakdown once more to confirm it worked.
     TVPPurgeNativeHeapForHost();
     logTeardownStep("heap_purged");
+    // The platform text stack's font mmaps are not the engine's, but their
+    // resident pages count against the same memory governor that throttles
+    // the next session's startup; drop them now.
+    TVPDropSystemFontPagesForHost();
+    logTeardownStep("font_pages_dropped");
     TVPLogNativeMemoryBreakdown("destroy_end");
     AndroidInfoLog("engine_destroy: KiriKiri project runtime reset complete");
   }

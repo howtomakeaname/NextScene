@@ -277,6 +277,7 @@ TVPNativeHeapStats TVPGetNativeHeapStats() {
 }
 
 void TVPPurgeNativeHeapForHost() { malloc_zone_pressure_relief(nullptr, 0); }
+void TVPDropSystemFontPagesForHost() {} // CoreText owns font mappings here
 
 void TVPLogNativeMemoryBreakdown(const char *tag) {
     malloc_statistics_t mst;

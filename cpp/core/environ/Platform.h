@@ -33,6 +33,13 @@ TVPNativeHeapStats TVPGetNativeHeapStats();
 // Safe to call from any compact path; cheap no-op where unsupported.
 void TVPPurgeNativeHeapForHost();
 
+// Drop resident pages of read-only system-font mappings held in this
+// process (platform text stacks mmap system fonts; CJK rasterization then
+// touches pages across the whole file, and the clean pages sit in RSS for
+// the life of the process). No-op where unneeded. Safe to call from any
+// compact path — dropped pages simply refault on next use.
+void TVPDropSystemFontPagesForHost();
+
 // One-shot native memory attribution (smaps breakdown + allocator internals)
 // for the engine log. Called at session teardown/start, not per tick.
 void TVPLogNativeMemoryBreakdown(const char *tag);
