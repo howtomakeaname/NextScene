@@ -29,6 +29,16 @@ tjs_int TVPGetSelfUsedMemory() {
     return info.WorkingSetSize / (1024 * 1024);
 }
 
+// Native heap introspection: the NT heap has no public per-process stats
+// API short of the debugger-only heap walk, so report unknown and rely on
+// the (mem) line's tracked/untracked split there.
+TVPNativeHeapStats TVPGetNativeHeapStats() { return { -1, -1 }; }
+void TVPPurgeNativeHeapForHost() {}
+void TVPLogNativeMemoryBreakdown(const char *tag) {
+    spdlog::info("(memstat:{}) rss={}MB heap=unknown", tag,
+                 TVPGetSelfUsedMemory());
+}
+
 void TVPGetMemoryInfo(TVPMemoryInfo &m) {
     MEMORYSTATUS status;
     status.dwLength = sizeof(status);

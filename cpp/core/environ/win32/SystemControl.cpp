@@ -37,9 +37,6 @@ std::atomic<uint64_t> g_perf_deliver_us{0};   // DeliverEvents
 std::atomic<uint64_t> g_perf_tickbeat_us{0};  // Window::TickBeat loop
 std::atomic<uint64_t> g_perf_gov_us{0};       // RunMemoryGovernor
 std::atomic<uint64_t> g_perf_rehash_us{0};    // TJSDoRehash
-#ifdef __APPLE__
-#include <malloc/malloc.h>
-#endif
 
 extern "C" int64_t TJS_GetCustomObjectCount();
 extern "C" int64_t TJS_GetScriptBlockCount();
@@ -167,20 +164,18 @@ void tTVPSystemControl::RunMemoryGovernor(uint32_t tick) {
 
     tjs_int heap_in_use_mb = 0;
     tjs_int heap_alloc_mb = 0;
-#ifdef __APPLE__
     {
-        malloc_statistics_t mst;
-        malloc_zone_statistics(nullptr, &mst);
-        heap_in_use_mb =
-            static_cast<tjs_int>(mst.size_in_use / (1024ULL * 1024ULL));
-        heap_alloc_mb =
-            static_cast<tjs_int>(mst.size_allocated / (1024ULL * 1024ULL));
+        // Live-heap view from the platform allocator (-1 where unknown).
+        // RSS-based pressure above already covers the tracked pools; this
+        // catches pure heap bloat that RSS growth alone underestimates.
+        const TVPNativeHeapStats heap = TVPGetNativeHeapStats();
+        heap_in_use_mb = heap.in_use_mb;
+        heap_alloc_mb = heap.mapped_mb;
         if(heap_in_use_mb > budget_mb / 2 && pressure < 2)
             pressure = 2;
         if(heap_in_use_mb > budget_mb * 3 / 4 && pressure < 3)
             pressure = 3;
     }
-#endif
 
     const tjs_int base_graphic_limit_mb =
         TVPClampInt(budget_mb / (MemoryProfile ? 10 : 12), 16,
@@ -240,17 +235,13 @@ void tTVPSystemControl::RunMemoryGovernor(uint32_t tick) {
     if(pressure == 0 && tick - LastIdleCompactTick >= idle_compact_interval) {
         LastIdleCompactTick = tick;
         TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_DEACTIVATE);
-#ifdef __APPLE__
-        malloc_zone_pressure_relief(nullptr, 0);
-#endif
+        TVPPurgeNativeHeapForHost();
     }
 
     if(pressure >= 1 && tick - LastDeepCompactedTick >= deep_compact_interval) {
         LastDeepCompactedTick = tick;
         TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_MINIMIZE);
-#ifdef __APPLE__
-        malloc_zone_pressure_relief(nullptr, 0);
-#endif
+        TVPPurgeNativeHeapForHost();
     }
 
     if(pressure >= 2 &&
@@ -258,24 +249,22 @@ void tTVPSystemControl::RunMemoryGovernor(uint32_t tick) {
         LastAggressiveCompactedTick = tick;
         TVPClearXP3SegmentCache();
         TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_MINIMIZE);
-#ifdef __APPLE__
-        malloc_zone_pressure_relief(nullptr, 0);
-#endif
+        TVPPurgeNativeHeapForHost();
     }
 
     if(pressure >= 3 && tick - LastCompactedTick >= 3000) {
         LastCompactedTick = tick;
         TVPClearXP3SegmentCache();
         TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_MAX);
-#ifdef __APPLE__
-        malloc_zone_pressure_relief(nullptr, 0);
-#endif
+        TVPPurgeNativeHeapForHost();
     }
 
-#ifdef __APPLE__
+    // Heap ceiling: the tracked pools are within budget but the live heap
+    // itself is most of the budget — something untracked is leaking into
+    // malloc-land. Only meaningful where heap stats are known (>= 0).
     {
         const tjs_int heap_ceiling_mb = budget_mb * 45 / 100;
-        if(heap_in_use_mb > heap_ceiling_mb &&
+        if(heap_in_use_mb >= 0 && heap_in_use_mb > heap_ceiling_mb &&
            tick - LastHeapCeilingTick >= 30000) {
             LastHeapCeilingTick = tick;
             spdlog::warn("Heap ceiling triggered: {}MB > {}MB ceiling, "
@@ -283,10 +272,9 @@ void tTVPSystemControl::RunMemoryGovernor(uint32_t tick) {
                          heap_in_use_mb, heap_ceiling_mb);
             TVPClearXP3SegmentCache();
             TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_MAX);
-            malloc_zone_pressure_relief(nullptr, 0);
+            TVPPurgeNativeHeapForHost();
         }
     }
-#endif
 
     static int sMemLogCount = 0;
     const uint32_t effectiveLogInterval =

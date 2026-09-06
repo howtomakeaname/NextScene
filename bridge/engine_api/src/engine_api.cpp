@@ -713,6 +713,12 @@ engine_result_t OpenGameCore(engine_handle_t handle,
 #endif
   spdlog::default_logger()->flush();
 
+  // Session-start snapshot: if the previous teardown returned memory this
+  // reads near-fresh RSS; if it did not, the new session starts at the
+  // previous peak and entry-time resource loading stalls (root cause of the
+  // same-process second-entry black screen).
+  TVPLogNativeMemoryBreakdown("session_start");
+
   try {
     spdlog::debug("engine_open_game: calling Application->StartApplication...");
 #if defined(__ANDROID__)
@@ -1188,6 +1194,15 @@ engine_result_t engine_destroy(engine_handle_t handle) {
     // TVPSystemUninit is deliberately not called here: it consumes the
     // one-shot at-exit registry and cannot be followed by a second project.
     AndroidInfoLog("engine_destroy: resetting KiriKiri project runtime");
+    // Teardown RSS ladder: each step logs RSS so the on-device log shows
+    // exactly which stage fails to hand memory back (the same-process
+    // second-session entry stall was caused by ~3.7GB surviving this path).
+    const auto logTeardownStep = [](const char* step) {
+      AndroidInfoLog("engine_destroy[%s]: rss=%dMB free=%dMB", step,
+                     TVPGetSelfUsedMemory(), TVPGetSystemFreeMemory());
+    };
+    logTeardownStep("start");
+    TVPLogNativeMemoryBreakdown("destroy_start");
     auto& egl = krkr::GetEngineEGLContext();
     if (egl.IsValid()) {
       try {
@@ -1204,22 +1219,27 @@ engine_result_t engine_destroy(engine_handle_t handle) {
       Application->OnExit();
     } catch (...) {
     }
+    logTeardownStep("app_exit");
     try {
       TVPResetScriptEngineForHost();
     } catch (...) {
     }
+    logTeardownStep("script_reset");
     try {
       TVPClearGraphicCache();
       TVPResetStorageForHost();
       TVPResetAutoMountPathsForHost();
     } catch (...) {
     }
+    logTeardownStep("caches_reset");
 
     TVPMainScene::DestroyInstance();
     EngineLoop::DestroyInstance();
+    logTeardownStep("scene_loop_destroyed");
 
     delete Application;
     Application = new tTVPApplication();
+    logTeardownStep("app_recreated");
 
     TVPResetProgramArgumentsAndDataPathForHost();
     TVPProjectDir = ttstr();
@@ -1239,6 +1259,12 @@ engine_result_t engine_destroy(engine_handle_t handle) {
     if (egl.IsValid()) {
       egl.ReleaseCurrent();
     }
+    // The heavy frees above happened on this thread; drop its allocator
+    // caches so the released pages actually leave RSS before the next
+    // session starts. Log the breakdown once more to confirm it worked.
+    TVPPurgeNativeHeapForHost();
+    logTeardownStep("heap_purged");
+    TVPLogNativeMemoryBreakdown("destroy_end");
     AndroidInfoLog("engine_destroy: KiriKiri project runtime reset complete");
   }
 

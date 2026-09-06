@@ -265,6 +265,28 @@ tjs_int TVPGetSelfUsedMemory() {
     return info.resident_size / (1024 * 1024);
 }
 
+// --- native heap introspection ------------------------------------------
+#include <malloc/malloc.h>
+#include <spdlog/spdlog.h>
+
+TVPNativeHeapStats TVPGetNativeHeapStats() {
+    malloc_statistics_t mst;
+    malloc_zone_statistics(nullptr, &mst);
+    return { static_cast<tjs_int>(mst.size_in_use / (1024ULL * 1024ULL)),
+             static_cast<tjs_int>(mst.size_allocated / (1024ULL * 1024ULL)) };
+}
+
+void TVPPurgeNativeHeapForHost() { malloc_zone_pressure_relief(nullptr, 0); }
+
+void TVPLogNativeMemoryBreakdown(const char *tag) {
+    malloc_statistics_t mst;
+    malloc_zone_statistics(nullptr, &mst);
+    spdlog::info("(memstat:{}) rss={}MB heap_in_use={}MB heap_alloc={}MB",
+                 tag, TVPGetSelfUsedMemory(),
+                 mst.size_in_use / (1024 * 1024),
+                 mst.size_allocated / (1024 * 1024));
+}
+
 std::string TVPGetCurrentLanguage() {
     CFArrayRef preferredLanguages = CFLocaleCopyPreferredLanguages();
     if (preferredLanguages == nullptr || CFArrayGetCount(preferredLanguages) == 0) {
