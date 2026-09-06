@@ -11,8 +11,10 @@
 #include "tjsCommHead.h"
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <memory>
+#include <spdlog/spdlog.h>
 #include "StorageIntf.h"
 #include "tjsUtils.h"
 #include "MsgIntf.h"
@@ -1241,7 +1243,17 @@ static tTJSBinaryStream *_TVPCreateStream(const ttstr &_name,
 
 tTJSBinaryStream *TVPCreateStream(const ttstr &_name, tjs_uint32 flags) {
     try {
-        return _TVPCreateStream(_name, flags);
+        // ストリーム生成の停滞切り分け用: TVPCreateStreamCS 待ち込みの
+        // 総所要時間を計測する(archive/console 以外の本体パスのみ)
+        const auto t0 = std::chrono::steady_clock::now();
+        tTJSBinaryStream *stream = _TVPCreateStream(_name, flags);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
+        if(ms > 200)
+            spdlog::warn("TVPCreateStream took {}ms: {}", ms,
+                         _name.AsStdString());
+        return stream;
     } catch(eTJSScriptException &e) {
         if(TJS_strchr(_name.c_str(), '#'))
             e.AppendMessage(
