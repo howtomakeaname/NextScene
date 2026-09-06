@@ -1518,7 +1518,45 @@ void tTJSNI_BaseLayer::DumpStructure(int level) {
         ttstr ptr{ fmt::format(" (object {})", static_cast<void *>(Owner)) };
         ttstr ptr2{ fmt::format(" (native {})", static_cast<void *>(this)) };
 
-        TVPAddLog(ttstr(indent) + name + ttstr(ptr) + ttstr(ptr2) +
+        // Content probe for the black-window forensics: opacity plus a
+        // coarse mean luma/alpha of the layer's own (CPU-side) main bitmap,
+        // sampled over up to 8x8 points. Distinguishes "a covering dark
+        // veil" / "layer bitmap itself dark" / "bitmaps bright but the
+        // composite is dark" without touching GL. Read-only sampling of the
+        // layer the caller already owns; the dump runs on the engine tick
+        // thread where the layer tree is otherwise iterated NOLOCK.
+        std::string content;
+        {
+            const tTVPBaseTexture *img = GetMainImage();
+            const tjs_uint sw = img ? img->GetWidth() : 0;
+            const tjs_uint sh = img ? img->GetHeight() : 0;
+            const tjs_int pitch = GetMainImagePixelBufferPitch();
+            const void *bits = GetMainImagePixelBuffer();
+            if(img && sw && sh && bits && pitch >= static_cast<tjs_int>(sw * 4)) {
+                const auto *base = static_cast<const tjs_uint8 *>(bits);
+                tjs_uint64 luma_sum = 0, alpha_sum = 0;
+                tjs_uint samples = 0;
+                const tjs_uint step_x = sw / 8 ? sw / 8 : 1;
+                const tjs_uint step_y = sh / 8 ? sh / 8 : 1;
+                for(tjs_uint sy = step_y / 2; sy < sh; sy += step_y) {
+                    const tjs_uint8 *row = base +
+                        static_cast<size_t>(sy) * static_cast<size_t>(pitch);
+                    for(tjs_uint sx = step_x / 2; sx < sw; sx += step_x) {
+                        const tjs_uint8 *px = row + sx * 4; // BGRA
+                        luma_sum += (px[2] * 299 + px[1] * 587 + px[0] * 114) / 1000;
+                        alpha_sum += px[3];
+                        samples++;
+                    }
+                }
+                if(samples) {
+                    content = fmt::format(" L={} A={}",
+                        luma_sum / samples, alpha_sum / samples);
+                }
+            }
+        }
+
+        TVPAddLog(ttstr(TJS_W("L:")) + ttstr(indent) + name + ttstr(ptr) +
+                  ttstr(ptr2) +
                   ttstr(TJS_W(" (")) + ttstr(Rect.left) + ttstr(TJS_W(",")) +
                   ttstr(Rect.top) + ttstr(TJS_W(")-(")) + ttstr(Rect.right) +
                   ttstr(TJS_W(",")) + ttstr(Rect.bottom) + ttstr(TJS_W(") (")) +
@@ -1526,9 +1564,10 @@ void tTJSNI_BaseLayer::DumpStructure(int level) {
                   ttstr(Rect.get_height()) + ttstr(TJS_W(")")) +
                   ttstr(TJS_W(" ")) +
                   ttstr(GetVisible() ? TJS_W("visible") : TJS_W("invisible")) +
+                  TJS_W(" opa=") + ttstr(GetOpacity()) +
                   TJS_W(" index=") + ttstr(GetAbsoluteOrderIndex()) +
                   ttstr(ProvinceImage ? TJS_W(" p") : TJS_W("")) + TJS_W(" ") +
-                  ttstr(GetTypeNameString()));
+                  ttstr(GetTypeNameString()) + ttstr(content.c_str()));
     } catch(...) {
         delete[] indent;
         throw;
