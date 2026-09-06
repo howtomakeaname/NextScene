@@ -95,6 +95,55 @@ tjs_int TVPGetSelfUsedMemory() {
     return (resident_pages * sysconf(_SC_PAGESIZE)) / (1024 * 1024); // 转换为 MB
 }
 
+// --- native heap introspection ------------------------------------------
+// This TU serves both desktop Linux (glibc) and Android (bionic, compiled
+// via the android platform set). glibc has mallinfo2 from 2.33; older glibc
+// falls back to 32-bit-field mallinfo. Bionic's mallinfo stays 32-bit until
+// API 31 and overflows on real heaps, so report unknown there rather than
+// nonsense numbers.
+#include <malloc.h>
+#include "posix_memstat.h"
+
+TVPNativeHeapStats TVPGetNativeHeapStats() {
+    TVPNativeHeapStats out{ -1, -1 };
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#if __GLIBC_PREREQ(2, 33)
+    struct mallinfo2 mi = mallinfo2();
+    if(mi.uordblks != 0 || mi.arena != 0 || mi.hblkhd != 0) {
+        out.in_use_mb = static_cast<tjs_int>(mi.uordblks / (1024ULL * 1024ULL));
+        out.mapped_mb =
+            static_cast<tjs_int>((mi.arena + mi.hblkhd) / (1024ULL * 1024ULL));
+    }
+#else
+    struct mallinfo mi = mallinfo();
+    if(mi.uordblks > 0 || mi.arena > 0) {
+        out.in_use_mb = mi.uordblks / (1024 * 1024);
+        out.mapped_mb = (mi.arena + mi.hblkhd) / (1024 * 1024);
+    }
+#endif
+#endif
+    return out;
+}
+
+void TVPPurgeNativeHeapForHost() {
+#if defined(__GLIBC__)
+    malloc_trim(0);
+#elif defined(__BIONIC__) && defined(__ANDROID_API__) && __ANDROID_API__ >= 31
+    mallopt(M_PURGE, 0);
+#endif
+}
+
+void TVPLogNativeMemoryBreakdown(const char *tag) {
+    char detail[160] = "";
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ) && __GLIBC_PREREQ(2, 33)
+    struct mallinfo2 mi = mallinfo2();
+    snprintf(detail, sizeof(detail),
+             "mi2 uord=%zu ford=%zu arena=%zu hblkhd=%zu keep=%zu",
+             mi.uordblks, mi.fordblks, mi.arena, mi.hblkhd, mi.keepcost);
+#endif
+    TVPLogPosixMemoryBreakdown(tag, TVPGetNativeHeapStats(), detail);
+}
+
 std::string TVPGetPackageVersionString() { return "linux"; }
 
 bool TVPCheckStartupPath(const std::string &path) { return true; }

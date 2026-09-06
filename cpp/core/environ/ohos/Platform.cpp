@@ -18,6 +18,9 @@
 #include <sys/time.h>
 #include <sys/sysinfo.h>
 
+#include <dlfcn.h>
+#include <malloc.h>
+
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -27,6 +30,7 @@
 #include "Platform.h"
 #include "StorageImpl.h"
 #include "SysInitImpl.h"
+#include "posix_memstat.h"
 
 #include "krkr_egl_context.h"
 
@@ -98,6 +102,62 @@ tjs_int TVPGetSelfUsedMemory() {
     tjs_int total_pages = 0, resident_pages = 0;
     statm >> total_pages >> resident_pages;
     return (resident_pages * sysconf(_SC_PAGESIZE)) / (1024 * 1024); // MB RSS
+}
+
+// --- native heap introspection ------------------------------------------
+// OHOS musl exposes mallinfo/mallinfo2 only from API 20, and the production
+// allocator is jemalloc behind the mallopt dfx interface, so resolve the
+// symbol at runtime and treat "absent or all-zero" as unknown (-1) rather
+// than trusting a zero report.
+namespace {
+
+struct OhosMallinfo2 { // mirrors musl struct mallinfo2 (size_t fields)
+    size_t arena, ordblks, smblks, hblks, hblkhd;
+    size_t usmblks, fsmblks, uordblks, fordblks, keepcost;
+};
+
+using OhosMallinfo2Fn = OhosMallinfo2 (*)();
+
+OhosMallinfo2Fn Mallinfo2Entry() {
+    static OhosMallinfo2Fn fn = reinterpret_cast<OhosMallinfo2Fn>(
+        dlsym(RTLD_DEFAULT, "mallinfo2"));
+    return fn;
+}
+
+} // namespace
+
+TVPNativeHeapStats TVPGetNativeHeapStats() {
+    TVPNativeHeapStats out{ -1, -1 };
+    OhosMallinfo2Fn mi2 = Mallinfo2Entry();
+    if(mi2 == nullptr)
+        return out;
+    const OhosMallinfo2 mi = mi2();
+    if(mi.uordblks == 0 && mi.arena == 0 && mi.hblkhd == 0)
+        return out; // dfx interface present but not backed by the allocator
+    out.in_use_mb = static_cast<tjs_int>(mi.uordblks / (1024ULL * 1024ULL));
+    out.mapped_mb =
+        static_cast<tjs_int>((mi.arena + mi.hblkhd) / (1024ULL * 1024ULL));
+    return out;
+}
+
+void TVPPurgeNativeHeapForHost() {
+    // OHOS has no malloc_trim; the documented closest equivalents are the
+    // musl-compat mallopt knobs. M_FLUSH_THREAD_CACHE drops the calling
+    // thread's jemalloc cache — on the teardown path the engine's big frees
+    // happened on this same thread, so this is where retention unwinds.
+    mallopt(M_FLUSH_THREAD_CACHE, 0);
+}
+
+void TVPLogNativeMemoryBreakdown(const char *tag) {
+    char detail[192] = "";
+    OhosMallinfo2Fn mi2 = Mallinfo2Entry();
+    if(mi2 != nullptr) {
+        const OhosMallinfo2 mi = mi2();
+        snprintf(detail, sizeof(detail),
+                 "mi2 uord=%zu ford=%zu arena=%zu hblkhd=%zu keep=%zu",
+                 mi.uordblks, mi.fordblks, mi.arena, mi.hblkhd, mi.keepcost);
+    }
+    TVPLogPosixMemoryBreakdown(tag, TVPGetNativeHeapStats(), detail);
 }
 
 std::string TVPGetPackageVersionString() { return "ohos"; }

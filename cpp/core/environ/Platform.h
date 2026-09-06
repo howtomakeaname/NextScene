@@ -17,6 +17,26 @@ void TVPGetMemoryInfo(TVPMemoryInfo &m);
 tjs_int TVPGetSystemFreeMemory(); // in MB
 tjs_int TVPGetSelfUsedMemory(); // in MB
 
+// Native (C heap) allocator stats. -1 = unknown on this platform / API level.
+// mapped_mb covers everything the allocator obtained from the OS, so on a
+// healthy teardown in_use drops near zero while mapped stays whatever the
+// allocator has NOT yet returned — the retention the memory governor needs
+// to see (RSS keeps counting retained pages until they are purged).
+struct TVPNativeHeapStats {
+    tjs_int in_use_mb;
+    tjs_int mapped_mb;
+};
+TVPNativeHeapStats TVPGetNativeHeapStats();
+
+// Ask the platform allocator to release free-but-retained pages back to the
+// OS (malloc_trim / mallopt(M_FLUSH_THREAD_CACHE) / zone pressure relief).
+// Safe to call from any compact path; cheap no-op where unsupported.
+void TVPPurgeNativeHeapForHost();
+
+// One-shot native memory attribution (smaps breakdown + allocator internals)
+// for the engine log. Called at session teardown/start, not per tick.
+void TVPLogNativeMemoryBreakdown(const char *tag);
+
 extern "C" int TVPShowSimpleMessageBox(const char *text, const char *caption,
                                        unsigned int nButton,
                                        const char **btnText); // C-style
