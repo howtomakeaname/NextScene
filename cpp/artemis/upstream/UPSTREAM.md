@@ -14,7 +14,13 @@ host-dialog and ownership/assembly refactors are intentionally deferred: they
 change the host callback contract, audio ownership and engine construction, so
 the HarmonyOS bridge and OHAudio backend need to migrate with them.
 
-## Local patches (keep this list current when re-syncing)
+## Integration notes and retained host patches
+
+At this pin, the portable directories under `src/` match upstream byte for
+byte. The list below records compatibility behavior this project relies on,
+including work that originated here and has since landed upstream. Remaining
+project-local differences live in the HarmonyOS backend, host bridge, build
+wiring and regression fixtures outside the vendored source tree.
 
 - `src/log/logger.{h,cpp}` — added `artc::SetLogSink()` so the KrKr2-Next
   bridge can mirror engine output into its startup-log queue / engine log
