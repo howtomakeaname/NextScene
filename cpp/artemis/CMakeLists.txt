@@ -42,7 +42,8 @@ file(GLOB_RECURSE ARTC_CORE_SOURCES CONFIGURE_DEPENDS
     ${ARTC_UPSTREAM}/src/config/*.cpp
     ${ARTC_UPSTREAM}/src/script/*.cpp
     ${ARTC_UPSTREAM}/src/log/*.cpp
-    ${ARTC_UPSTREAM}/src/render/*.cpp)
+    ${ARTC_UPSTREAM}/src/render/*.cpp
+    ${ARTC_UPSTREAM}/src/util/*.cpp)
 
 if(OHOS)
     list(APPEND ARTC_CORE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/ohos/audio_ohos.cpp)
