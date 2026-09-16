@@ -1,12 +1,18 @@
 # artemis-compat (vendored)
 
 Upstream: https://github.com/Weiss-UltimateSavior/artemis-compat
-Pinned commit: `d23ca4d6df0abd5d305da683971b55a1ae6bd2c0` (2026-09-01, "README: update")
+Pinned source commit: `2c44929ca854ec5dbab6f0727fb21179c62b4b4a`
+(2026-09-14, compatibility fixes through the pre-host-dialog series)
 License: GPL-3.0 (`LICENSE`), third-party components per `THIRD_PARTY_NOTICES.md`
 (Lua 5.1.5 — MIT; stb_vorbis — public domain / MIT).
 
 Only `src/` (minus `cli/` and `jni/`) and `third_party/` are vendored; the
 standalone `lua.c` / `luac.c` interpreters are removed.
+
+The source tree matches upstream through the pinned commit. Later upstream
+host-dialog and ownership/assembly refactors are intentionally deferred: they
+change the host callback contract, audio ownership and engine construction, so
+the HarmonyOS bridge and OHAudio backend need to migrate with them.
 
 ## Local patches (keep this list current when re-syncing)
 

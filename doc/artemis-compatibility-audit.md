@@ -84,7 +84,7 @@
 ## 对照范围与证据
 
 - 原库与 Android 接入：[Tyranor-Next](https://github.com/Weiss-UltimateSavior/Tyranor-Next)，检出提交 `2f28e0c`，目录 `engine/src/main/nativeplugins/artemis/arm64-v8a`。
-- 兼容引擎：[artemis-compat](https://github.com/Weiss-UltimateSavior/artemis-compat)，本项目 vendor 固定提交 `d23ca4d6df0abd5d305da683971b55a1ae6bd2c0`，附加修补见 `cpp/artemis/upstream/UPSTREAM.md`。
+- 兼容引擎：[artemis-compat](https://github.com/Weiss-UltimateSavior/artemis-compat)，本项目 vendor 源码同步至提交 `2c44929ca854ec5dbab6f0727fb21179c62b4b4a`，宿主差异与附加修补见 `cpp/artemis/upstream/UPSTREAM.md`。
 - 方法：ELF 动态依赖、导出符号、字符串和 ARM64 函数定点反汇编，再与实际游戏 Lua 调用及兼容引擎实现对照。没有恢复完整原版 C++ 源码；符号存在本身也不能证明某游戏在该版本中的实际行为。
 - 实际游戏包：本地私有测试包（来源与名称略）。游戏资源和提取脚本仅用于本地验证，不纳入回归测试或源码。
 

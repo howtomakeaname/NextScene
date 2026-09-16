@@ -48,7 +48,7 @@ upstream https://github.com/reAAAq/KrKr2-Next.git
 ## 先读哪些文件
 
 1. `doc/artemis-compatibility-audit.md`：分轮实现、证据、已知缺口和 Android 二进制对照。
-2. `cpp/artemis/upstream/UPSTREAM.md`：vendor 补丁清单；原上游固定 `d23ca4d6df0abd5d305da683971b55a1ae6bd2c0`。
+2. `cpp/artemis/upstream/UPSTREAM.md`：vendor 补丁清单与当前上游固定版本。
 3. `cpp/artemis/upstream/src/script/lua_engine.{h,cpp}`、`input_state.h`、`asb_parser.{h,cpp}`：本次交互挂起优先查看。
 4. `cpp/artemis/upstream/src/render/compositor.*`、`layer_shader.*`、`video_player.*`：画面仍变化时的 tween/视频/渲染和等待衔接。
 5. `bridge/engine_api/src/artemis_runtime.*`、`cpp/artemis/ohos/`：实际鸿蒙宿主循环、触控、音频和生命周期；按证据再决定是否涉及平台。
