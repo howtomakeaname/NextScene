@@ -914,7 +914,7 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String get rescanGamesDir => 'ゲームフォルダを再スキャン';
+  String get rescanGamesDir => 'ディレクトリを再スキャン';
 
   @override
   String rescanGamesDirDesc(String path) {
@@ -1046,7 +1046,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get selectGameDirectory => 'ゲームディレクトリを選択';
 
   @override
-  String get selectGameArchive => 'ゲームアーカイブを選択（XP3 / PFS）';
+  String get selectGameArchive => 'ゲームアーカイブを選択';
 
   @override
   String get addArchive => 'XP3 追加';

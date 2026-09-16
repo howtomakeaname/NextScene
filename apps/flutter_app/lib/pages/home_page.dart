@@ -6,7 +6,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:path/path.dart' as p;
@@ -392,11 +391,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       anchor: anchor ?? _fallbackMenuAnchor(context),
       items: [
         UiMenuItem(
-          label: l10n.selectGameDirectory,
-          icon: LucideIcons.folderOpen,
-          value: 'directory',
-        ),
-        UiMenuItem(
           label: l10n.selectGameArchive,
           icon: LucideIcons.archive,
           value: 'xp3',
@@ -404,9 +398,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (Platform.operatingSystem == 'ohos')
           UiMenuItem(
             label: l10n.rescanGamesDir,
-            subtitle: l10n.rescanGamesDirDesc(
-              _ohosGamesDirDisplay ?? 'Download/<bundleName>/games',
-            ),
             icon: LucideIcons.scanSearch,
             value: 'sandbox',
           ),
@@ -414,15 +405,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
     if (source == null || !mounted) return;
 
-    if (source == 'directory') {
-      await _addGameDirectory();
-    } else if (source == 'sandbox') {
+    if (source == 'sandbox') {
       await _addGameFromSandbox();
     } else {
       await _addGameArchive();
     }
   }
 
+  // Kept for future entry points; the home import menu currently hides it.
+  // ignore: unused_element
   Future<void> _addGameDirectory() async {
     final l10n = AppLocalizations.of(context)!;
     if (Platform.operatingSystem == 'ohos') {
@@ -628,15 +619,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       result = null;
     }
     if (!mounted) return;
-    if (result == null || result.files.isEmpty) {
-      // 用户取消选择器时回落到 URL 网络导入：模拟器/调试场景经 hdc rport
-      // 从开发机拉取，真机可走同一 Wi-Fi 的局域网地址。
-      final docDir = await getApplicationDocumentsDirectory();
-      final url = await _showOhosNetworkImport(docDir.path);
-      if (url == null || url.isEmpty || !mounted) return;
-      await _downloadAndAddGame(url);
-      return;
-    }
+    if (result == null || result.files.isEmpty) return;
     final selectedPaths = result.files
         .map((f) => f.path)
         .whereType<String>()
@@ -930,54 +913,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// OHOS 网络导入弹窗：输入 URL 拉取 .xp3 到应用沙箱。
-  Future<String?> _showOhosNetworkImport(String hintPath) {
-    final l10n = AppLocalizations.of(context)!;
-    // The emulator debug bridge (`hdc rport tcp:8080 tcp:8080`) forwards the
-    // device's loopback:8080 to the development host, so this default works
-    // with any static file server on the host.
-    const defaultUrl = 'http://127.0.0.1:8080/data.xp3';
-    // Build marker: bumped whenever the import flow changes, so the live
-    // build can be identified from a screenshot (v2: resume + re-import).
-    const flowVersion = 'v4-watchdog';
-    final controller = TextEditingController(text: defaultUrl);
-    final future = UiDialog.show<String>(
-      context,
-      title: l10n.selectGameArchive,
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '($flowVersion)\n$hintPath',
-            style: context.uiType.footnote.copyWith(
-              fontFamily: 'monospace',
-              color: context.uiColors.textTertiary,
-            ),
-          ),
-          const SizedBox(height: UiSpacing.md),
-          UiInput(controller: controller, label: 'URL'),
-        ],
-      ),
-      actions: [
-        UiDialogAction(label: l10n.cancel),
-        UiDialogAction(
-          label: l10n.addGame,
-          isDefault: true,
-          onPressed: () => Navigator.pop(context, controller.text.trim()),
-        ),
-      ],
-    );
-    // 等退场动画结束后再释放输入控制器，避免动画期间访问已释放对象。
-    future.whenComplete(
-      () => Future<void>.delayed(
-        const Duration(milliseconds: 500),
-        controller.dispose,
-      ),
-    );
-    return future;
-  }
-
   /// 目录里有多个 XP3 时让用户选择主归档（默认选中第一个）。
   Future<File?> _pickXp3File(List<File> xp3Files) async {
     final picked = await _pickCandidatePath(
@@ -1043,202 +978,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ),
     );
     return future;
-  }
-
-  /// Downloads a game archive over HTTP into the sandbox and registers it.
-  /// This is the OHOS dev/emulator import path: neither `hdc file send` nor
-  /// the system picker can deliver multi-GB data into the sandbox, so the
-  /// app pulls the file itself (e.g. via `hdc rport tcp:8080 tcp:8080`
-  /// tunneling to a static file server on the host).
-  Future<void> _downloadAndAddGame(String url) async {
-    final l10n = AppLocalizations.of(context)!;
-    final docDir = await getApplicationDocumentsDirectory();
-    if (!mounted) return;
-    final name = url
-        .split('/')
-        .lastWhere((s) => s.isNotEmpty, orElse: () => 'data.xp3');
-    final dest = File(p.join(docDir.path, name));
-
-    final progress = ValueNotifier<String>('');
-    // ignore: unawaited_futures
-    UiDialog.show<void>(
-      context,
-      barrierDismissible: false,
-      title: name,
-      content: ValueListenableBuilder<String>(
-        valueListenable: progress,
-        builder: (ctx, text, _) => Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const UiLoader(),
-            const SizedBox(height: UiSpacing.md),
-            Text(
-              text,
-              textAlign: TextAlign.center,
-              style: ctx.uiType.footnote.copyWith(
-                fontFamily: 'monospace',
-                color: ctx.uiColors.textTertiary,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    // Only bytes this flow appends may be rolled back on failure. The
-    // destination can pre-date the import — a completed archive from a
-    // previous run, or an unrelated file sharing the name — and on any
-    // download error it must survive byte-for-byte. Remember the on-entry
-    // state; the error path truncates back to it instead of deleting
-    // (deleting once destroyed a complete on-device archive).
-    var preexisting = false;
-    var initialLength = 0;
-    String? error;
-    try {
-      // The rport tunnel can drop the connection mid-stream and Dart's
-      // http stream then ends cleanly — a truncated file looks like a
-      // successful import. Resume via HTTP Range until the reported
-      // Content-Length is fully on disk.
-      const int kMaxAttempts = 30;
-      var total = 0;
-      // Resume a partially-downloaded file from a previous import: probe
-      // with a Range offset instead of restarting 2.7 GB from scratch.
-      preexisting = await dest.exists();
-      initialLength = preexisting ? await dest.length() : 0;
-      var received = initialLength;
-      for (var attempt = 1; attempt <= kMaxAttempts; attempt++) {
-        final client = http.Client();
-        try {
-          final request = http.Request('GET', Uri.parse(url));
-          if (received > 0) {
-            request.headers['Range'] = 'bytes=$received-';
-          }
-          final response = await client.send(request);
-          if (response.statusCode == 416 && received > 0) {
-            // Offset at/after EOF: the file is already complete.
-            total = received;
-            break;
-          }
-          final isResume = response.statusCode == 206 && received > 0;
-          if (response.statusCode != 200 && !isResume) {
-            throw Exception('HTTP ${response.statusCode}');
-          }
-          if (response.statusCode == 200 && received > 0) {
-            // Server ignored our Range header — appending the full body
-            // would corrupt the file.
-            throw Exception('server does not support Range resume');
-          }
-          if (attempt == 1) {
-            total = response.contentLength ?? 0;
-            if (received > 0 && total > 0) total += received;
-          } else if (isResume) {
-            // 206 carries the remaining length only.
-            if (response.contentLength != null) {
-              total = received + response.contentLength!;
-            }
-          }
-          final sink = dest.openWrite(
-            mode: received > 0 ? FileMode.append : FileMode.write,
-          );
-          var lastPace = 0;
-          try {
-            // 30s inter-chunk watchdog: a dropped tunnel can leave the
-            // stream open-but-silent forever; timeout throws and the outer
-            // loop resumes from the last flushed offset.
-            await for (final chunk in response.stream.timeout(
-              const Duration(seconds: 30),
-            )) {
-              sink.add(chunk);
-              received += chunk.length;
-              // Pace multi-GB writes: saturating the guest's page cache at
-              // loopback speed once took down the emulator's device daemon.
-              // A short pause every 16 MB keeps the transfer around
-              // 100-150 MB/s and refreshes the progress line.
-              if (received - lastPace >= 16 * 1024 * 1024) {
-                lastPace = received;
-                // Flush at each pace point: IOSink.add only buffers in RAM,
-                // so without this the on-disk size (used to resume after a
-                // crash/force-stop) lags arbitrarily behind `received`.
-                await sink.flush();
-                progress.value =
-                    '${(received / 1048576).toStringAsFixed(1)} MB'
-                    '${total > 0 ? ' / ${(total / 1048576).toStringAsFixed(1)} MB' : ''}';
-                await Future<void>.delayed(const Duration(milliseconds: 120));
-              }
-            }
-          } finally {
-            await sink.flush();
-            await sink.close();
-          }
-        } finally {
-          client.close();
-        }
-        if (total <= 0 || received >= total) break;
-        // Truncated — loop and resume from `received`.
-        await Future<void>.delayed(const Duration(milliseconds: 500));
-      }
-      if (total > 0 && received < total) {
-        throw Exception(
-          'download incomplete: '
-          '${(received / 1048576).toStringAsFixed(1)} MB of '
-          '${(total / 1048576).toStringAsFixed(1)} MB',
-        );
-      }
-      progress.value =
-          '${(received / 1048576).toStringAsFixed(1)} MB'
-          '${total > 0 ? ' / ${(total / 1048576).toStringAsFixed(1)} MB' : ''}';
-    } catch (e) {
-      error = e.toString();
-    }
-
-    if (mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
-    }
-    if (error != null) {
-      // Never leave a partial file behind — a truncated .xp3 registers as a
-      // valid game but corrupts engine startup. But only the bytes this
-      // flow appended may be rolled back: a destination that pre-existed
-      // the import is restored to its on-entry length, never deleted.
-      try {
-        if (await dest.exists()) {
-          if (preexisting) {
-            final raf = await dest.open(mode: FileMode.append);
-            try {
-              if (await raf.length() > initialLength) {
-                await raf.truncate(initialLength);
-              }
-            } finally {
-              await raf.close();
-            }
-          } else {
-            await dest.delete();
-          }
-        }
-      } catch (_) {}
-      if (mounted) {
-        UiSnackbar.show(
-          context,
-          message: error,
-          type: UiSnackbarType.error,
-          duration: const Duration(seconds: 6),
-        );
-      }
-      return;
-    }
-
-    final game = GameInfo(path: dest.path);
-    final added = await _gameManager.addGame(game);
-    if (!mounted) return;
-    if (added) {
-      setState(() {});
-      _offerScrapeAfterAdd(dest.path);
-    } else {
-      UiSnackbar.show(
-        context,
-        message: l10n.gameAlreadyExists(p.basename(dest.path)),
-        type: UiSnackbarType.warning,
-      );
-    }
   }
 
   /// Finds .xp3 archives under [root], up to a small depth so an accidental

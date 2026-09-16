@@ -946,7 +946,7 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get rescanGamesDir => 'Rescan Games Folder';
+  String get rescanGamesDir => 'Rescan Directory';
 
   @override
   String rescanGamesDirDesc(String path) {
@@ -1081,7 +1081,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get selectGameDirectory => 'Select Game Directory';
 
   @override
-  String get selectGameArchive => 'Select Game Archive (XP3 / PFS)';
+  String get selectGameArchive => 'Select Game Archive';
 
   @override
   String get addArchive => 'Add XP3';

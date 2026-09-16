@@ -350,7 +350,7 @@
   "gameTypeArtemis": "Artemis パック（.pfs）",
   "gameEngine": "エンジン: {engine}",
   "missingArtemisPack": "Artemis パック（.pfs）が見つかりません: {path}",
-  "rescanGamesDir": "ゲームフォルダを再スキャン",
+  "rescanGamesDir": "ディレクトリを再スキャン",
   "rescanGamesDirDesc": "{path} に置いた、または hdc で転送したゲームを検索（XP3 / Artemis .pfs）",
   "noGamesFoundInSandbox": "ゲームフォルダとアプリサンドボックスにゲームが見つかりません。",
   "allSandboxGamesRegistered": "見つかったゲームはすべてライブラリに登録済みです。",
@@ -391,7 +391,7 @@
   "engineRestartRequired": "エンジンはこのセッションで別のゲームを実行中です。変更するにはアプリを再起動してください。",
   "gamesImported": "{count} 件のゲームをインポートしました",
   "selectGameDirectory": "ゲームディレクトリを選択",
-  "selectGameArchive": "ゲームアーカイブを選択（XP3 / PFS）",
+  "selectGameArchive": "ゲームアーカイブを選択",
   "addArchive": "XP3 追加",
 
   "justNow": "たった今",

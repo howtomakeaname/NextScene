@@ -420,7 +420,7 @@
       "path": { "type": "String" }
     }
   },
-  "rescanGamesDir": "Rescan Games Folder",
+  "rescanGamesDir": "Rescan Directory",
   "rescanGamesDirDesc": "Find games dropped into {path} or sent in with hdc (XP3 / Artemis .pfs)",
   "@rescanGamesDirDesc": {
     "placeholders": {
@@ -481,7 +481,7 @@
     }
   },
   "selectGameDirectory": "Select Game Directory",
-  "selectGameArchive": "Select Game Archive (XP3 / PFS)",
+  "selectGameArchive": "Select Game Archive",
   "addArchive": "Add XP3",
 
   "justNow": "just now",

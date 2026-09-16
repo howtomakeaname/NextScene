@@ -899,7 +899,7 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get rescanGamesDir => '重新扫描游戏目录';
+  String get rescanGamesDir => '重新扫描目录';
 
   @override
   String rescanGamesDirDesc(String path) {
@@ -1030,7 +1030,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get selectGameDirectory => '选择游戏目录';
 
   @override
-  String get selectGameArchive => '选择游戏归档（XP3 / PFS）';
+  String get selectGameArchive => '选择游戏归档';
 
   @override
   String get addArchive => '添加 XP3';

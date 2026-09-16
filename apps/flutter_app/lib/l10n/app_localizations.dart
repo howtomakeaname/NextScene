@@ -1759,7 +1759,7 @@ abstract class AppLocalizations {
   /// No description provided for @rescanGamesDir.
   ///
   /// In en, this message translates to:
-  /// **'Rescan Games Folder'**
+  /// **'Rescan Directory'**
   String get rescanGamesDir;
 
   /// No description provided for @rescanGamesDirDesc.
@@ -2005,7 +2005,7 @@ abstract class AppLocalizations {
   /// No description provided for @selectGameArchive.
   ///
   /// In en, this message translates to:
-  /// **'Select Game Archive (XP3 / PFS)'**
+  /// **'Select Game Archive'**
   String get selectGameArchive;
 
   /// No description provided for @addArchive.

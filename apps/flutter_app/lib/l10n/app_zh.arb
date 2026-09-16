@@ -360,7 +360,7 @@
   "gameTypeArtemis": "Artemis 封包（.pfs）",
   "gameEngine": "引擎：{engine}",
   "missingArtemisPack": "未找到 Artemis 封包（.pfs）：{path}",
-  "rescanGamesDir": "重新扫描游戏目录",
+  "rescanGamesDir": "重新扫描目录",
   "rescanGamesDirDesc": "查找放入 {path} 或经 hdc 送入的游戏（XP3 / Artemis .pfs）",
   "noGamesFoundInSandbox": "游戏目录和应用沙箱中都没有找到游戏。",
   "allSandboxGamesRegistered": "找到的游戏都已在库中。",
@@ -401,7 +401,7 @@
   "engineRestartRequired": "引擎已在本会话中运行另一游戏，如需切换新游戏请重启应用。",
   "gamesImported": "已导入 {count} 个游戏",
   "selectGameDirectory": "选择游戏目录",
-  "selectGameArchive": "选择游戏归档（XP3 / PFS）",
+  "selectGameArchive": "选择游戏归档",
   "addArchive": "添加 XP3",
 
   "justNow": "刚刚",
