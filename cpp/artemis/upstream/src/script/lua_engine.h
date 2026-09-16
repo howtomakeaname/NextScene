@@ -51,8 +51,11 @@ public:
     bool CallGlobal(const std::string &fn);
     bool CallGlobalInternal(const std::string &fn, bool quiet);
     // Dispatch an engine tag through the e:tag bridge (iet [tag ...] lines).
+    // `apply_filter` is false for engine-internal queued tags (eqwait drains)
+    // so the framework's tag filter cannot re-enqueue itself.
     bool DispatchTag(const std::string &tag,
-                     const std::vector<std::pair<std::string, std::string>> &attrs);
+                     const std::vector<std::pair<std::string, std::string>> &attrs,
+                     bool apply_filter = true);
     std::string ResolveValue(const std::string& value) const;
 
     // ---- input & frame hooks (M2.2) ----
@@ -128,6 +131,9 @@ public:
     // true while the pointer is down and a draggable layer was grabbed — the
     // following up must not fall through to ClickAt (button activation).
     bool DragActive() const { return !drag_id_.empty(); }
+    // True once the pointer actually moved during the grab. A zero-move grab is
+    // a click on a draggable layer and must still dispatch a click.
+    bool DragMoved() const { return drag_moved_; }
 
     // Locate the lyevent attr table for (layer, event type), walking up the
     // id hierarchy. With out==null only reports existence.
@@ -214,14 +220,22 @@ private:
     static int l_getTouchCount(lua_State *L);
     static int l_setEventHandler(lua_State *L);
     static int l_setEventFilter(lua_State *L);
+    static int l_setTagFilter(lua_State *L);
+    // Run the tag filter (function or per-tag table). Returns 0 allow, 1 block,
+    // 2 replace (fills *replacement).
+    int FilterTag(const std::string &tag,
+                  const std::vector<std::pair<std::string, std::string>> &attrs,
+                  std::string *replacement);
     bool FilterEvent(const std::string& kind,
                      const std::vector<std::pair<std::string, std::string>>& attrs);
     int event_filter_ref_ = -2; // LUA_NOREF
+    int tag_filter_ref_ = -2;   // LUA_NOREF
     static int l_overrideKey(lua_State *L);
     void DispatchFrameInput();
     void DispatchClick(float x, float y);
     void AdvanceByInput();
     void SetAutoMode(bool enabled);
+    void FireNamedEvent(const std::string &key);
     void UpdateVideos();
     void UpdateEmotes();
     // e:createEmoteLayer{...} / e:getEmoteLayer(id) / e:getEmoteVersion()
@@ -232,6 +246,13 @@ private:
     static int l_random(lua_State *L);
     static int l_getScriptStack(lua_State *L);
     static int l_getScriptWaitReason(lua_State *L);
+    static int l_getScriptStatus(lua_State *L);
+    static int l_setScriptStatus(lua_State *L);
+    static int l_getScriptSize(lua_State *L);
+    static int l_getFrameNumber(lua_State *L);
+    static int l_getTouchPoint(lua_State *L);
+    static int l_setFlickSensitivity(lua_State *L);
+    static int l_getScriptBlock(lua_State *L);
     static int l_lyevent(lua_State *L);
     bool PushGlobalFn(const std::string &fn, bool quiet);
     bool CallEvent(const std::string &fn,
@@ -271,6 +292,9 @@ private:
     // drag_origin_ = pointer stage pos at press; drag_off_ = layer's stored
     // left/top offset at press (dragarea-relative).
     std::string drag_id_;
+    bool drag_moved_ = false;
+    std::string hover_id_;   // topmost rollover-owning layer under the pointer
+    void HoverMove(float x, float y);
     float drag_origin_x_ = 0, drag_origin_y_ = 0;
     float drag_off_x_ = 0, drag_off_y_ = 0;
     bool waiting_ = false;                              // click-wait gating
@@ -286,6 +310,10 @@ private:
     std::vector<std::string> auto_sync_se_;
     AutoReadTimer auto_timer_;
     std::map<std::string, std::vector<std::pair<std::string, std::string>>> auto_events_;
+    // Generic setonX/delonX registry for handler kinds without dedicated state
+    // (backlog/commandskip/controlskip/dirchg/hide/windowbutton ...).
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>> named_events_;
+    bool hidden_ = false;   // [hide] state (fires onhidein/onhideout)
     // KrKr2-Next: [wait se=N] — released when voice N stops (or by input).
     bool se_wait_ = false;
     std::string wait_se_key_;
@@ -319,6 +347,10 @@ private:
     std::map<std::string, std::map<std::string, std::string>> font_of_;
     std::map<std::string, std::string> font_main_;   // widest visible area
     std::map<std::string, std::string> font_name_;   // small visible area
+    std::map<std::string, std::string> font_defaults_; // [fontdefault]
+    std::map<std::string, std::string> glyph_config_;  // [glyph] click-wait icon
+    bool link_active_ = false, link_enabled_ = true;   // [link]/[linkdisable]
+    std::string link_file_, link_label_;
     std::chrono::steady_clock::time_point wait_until_;
     std::set<std::string> seen_tags_;                   // first-occurrence tag trace
     int msg_layer_height_ = 50;                     // font tag height → get_message_layer_height
@@ -342,6 +374,9 @@ private:
     int touch_count_ = 0;
     int debug_mode_ = 0;
     int debug_level_ = 0;
+    int script_status_ = 1;      // e:getScriptStatus / setScriptStatus
+    uint64_t frame_number_ = 0;  // e:getFrameNumber, bumped each frame
+    float flick_sensitivity_ = 0.f;
     std::chrono::steady_clock::time_point init_time_;
     std::chrono::steady_clock::time_point clock_pause_at_{};
     bool clock_paused_ = false;

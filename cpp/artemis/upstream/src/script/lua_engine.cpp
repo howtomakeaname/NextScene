@@ -1,6 +1,7 @@
 #include "script/lua_engine.h"
 #include "script/asb_parser.h"
 #include "script/expression.h"
+#include "script/preprocess.h"
 #include "render/compositor.h"
 #include "render/stb_image.h"
 #include "audio/audio.h"
@@ -12,10 +13,14 @@
 #include "script/native_save.h"
 #include "script/save_storage.h"
 #include "script/save_metadata.h"
+#include "script/runtime_state.h"
+#include "util/encoding.h"
 #include <filesystem>
 #include "log/logger.h"
 
 #include <cstring>
+#include <cctype>
+#include <cstdint>
 #include <new>       // placement new for the E-mote proxy userdata
 #include <chrono>
 #include <cmath>
@@ -550,7 +555,7 @@ void LuaEngine::ResumeAudio() { if (audio_) audio_->ResumeAll(); }
 void LuaEngine::PushKeyDown(int key) { input_.Press(key); }
 void LuaEngine::PushKeyUp(int key) { input_.Release(key); }
 
-void LuaEngine::SetMousePoint(float x, float y) { mouse_x_ = x; mouse_y_ = y; }
+void LuaEngine::SetMousePoint(float x, float y) { mouse_x_ = x; mouse_y_ = y; HoverMove(x, y); }
 void LuaEngine::SetTouchCount(int count) { touch_count_ = count; }
 
 void LuaEngine::EndFrame() {
@@ -558,6 +563,7 @@ void LuaEngine::EndFrame() {
 }
 
 bool LuaEngine::RunEnterFrame() {
+    ++frame_number_;
     advanced_this_frame_ = false;
     if (sounds_) sounds_->Update(NowMs());
     UpdateVideos();
@@ -575,6 +581,34 @@ bool LuaEngine::RunEnterFrame() {
     return ok;
 }
 
+// Standard-library harden: keep the scripting surface the frameworks actually
+// use (os.date/io.open/io.close) but drop the process-level host surface and
+// the arbitrary-code loaders. ARTC_LUA_STDLIB=stock skips it for A/B tests.
+namespace {
+void DropFields(lua_State *L, const char *table, const char *const *names, size_t n) {
+    lua_getglobal(L, table);
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
+    for (size_t i = 0; i < n; ++i) { lua_pushnil(L); lua_setfield(L, -2, names[i]); }
+    lua_pop(L, 1);
+}
+void ApplyLuaStdlibBlockList(lua_State *L) {
+    if (const char *v = std::getenv("ARTC_LUA_STDLIB"); v && std::strcmp(v, "stock") == 0)
+        return;
+    static const char *const kOsBanned[] = {"execute", "exit", "remove", "rename",
+                                            "setlocale", "tmpname", "system"};
+    DropFields(L, "os", kOsBanned, sizeof(kOsBanned) / sizeof(kOsBanned[0]));
+    static const char *const kIoBanned[] = {"popen", "tmpfile", "input", "output"};
+    DropFields(L, "io", kIoBanned, sizeof(kIoBanned) / sizeof(kIoBanned[0]));
+    // NOTE: loadstring stays reachable — the pluto save codec (src/script/
+    // pluto.lua) reconstructs persisted functions through it. dofile/loadfile
+    // (host file loaders) are still dropped.
+    static const char *const kGlobalBanned[] = {"dofile", "loadfile"};
+    for (const char *n : kGlobalBanned) { lua_pushnil(L); lua_setglobal(L, n); }
+    static const char *const kPkgBanned[] = {"loadlib", "loaders", "preload", "seeall"};
+    DropFields(L, "package", kPkgBanned, sizeof(kPkgBanned) / sizeof(kPkgBanned[0]));
+}
+} // namespace
+
 bool LuaEngine::Init(PackManager *packs, const Ini &systemIni,
                      const std::string &osName, int screenWidth, int screenHeight,
                      Compositor *compositor) {
@@ -584,10 +618,26 @@ bool LuaEngine::Init(PackManager *packs, const Ini &systemIni,
     audio_ = new Audio();
     audio_->Init(packs);
     sounds_ = new AudioChannels(*audio_);
+    // Optional project tag.ini: positional parameter names for line tags.
+    {
+        std::vector<uint8_t> tag_ini;
+        if ((packs && packs->Read("tag.ini", tag_ini)) ||
+            (packs && packs->Read("system/tag.ini", tag_ini)))
+            InstallTagIniFromText(std::string(tag_ini.begin(), tag_ini.end()));
+        else
+            ClearTagIni();
+    }
+    // Project text charset (system.ini CHARSET) for script decoding.
+    {
+        std::string cs = systemIni.Get("WINDOWS", "CHARSET");
+        if (cs.empty()) cs = systemIni.Get("ANDROID", "CHARSET");
+        SetTextCharset(cs);
+    }
     L_ = luaL_newstate();
     if (!L_) return false;
     init_time_ = std::chrono::steady_clock::now();
     luaL_openlibs(L_);
+    ApplyLuaStdlibBlockList(L_);
     // register the pluto serializer (save/load data format)
     if (luaL_dostring(L_, PLUTO_LUA_SRC) != 0) {
         Log(kLogError, std::string("pluto registration failed: ") + lua_tostring(L_, -1));
@@ -639,7 +689,7 @@ bool LuaEngine::Init(PackManager *packs, const Ini &systemIni,
         {"tag", l_tag}, {"var", l_var}, {"isFileExists", l_isFileExists},
         {"include", l_include}, {"debug", l_debug}, {"now", l_now},
         {"file", l_file},
-        {"setTagFilter", l_noop},
+        {"setTagFilter", l_setTagFilter},
         {"setMagicPath", l_setMagicPath},
         {"setUseMultiTouch", l_noop},
         {"setUseTouchHold", l_noop},
@@ -659,8 +709,16 @@ bool LuaEngine::Init(PackManager *packs, const Ini &systemIni,
         {"lyevent", l_lyevent},
         {"getScriptStack", l_getScriptStack},
         {"getScriptWaitReason", l_getScriptWaitReason},
+        {"getScriptStatus", l_getScriptStatus},
+        {"setScriptStatus", l_setScriptStatus},
+        {"getScriptSize", l_getScriptSize},
+        {"getFrameNumber", l_getFrameNumber},
+        {"getTouchPoint", l_getTouchPoint},
+        {"setFlickSensitivity", l_setFlickSensitivity},
+        {"getScriptBlock", l_getScriptBlock},
         {"bindSurface", l_noop},
         {"clearSurfaceLoadQueue", l_noop},
+        {"isLoadingSurface", l_noop},
         // KrKr2-Next: surface cache release is a no-op without a surface
         // cache; PNG text chunks carry the face-part anchors (image_fg.lua
         // getfgfilepos → "pos,x,y[,w,h,frames,com]").
@@ -729,6 +787,98 @@ bool LuaEngine::Init(PackManager *packs, const Ini &systemIni,
 }
 
 // e:tag{ "tagname", key=value, ... } — M0: log + implement `var` and `debug`.
+// ---- var system= helpers (arithmetic on byte strings + UTF-8 modes) --------
+int Utf8Length(const std::string &s) {
+    int n = 0;
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        i += c < 0x80 ? 1 : (c < 0xE0 ? 2 : (c < 0xF0 ? 3 : 4));
+        ++n;
+    }
+    return n;
+}
+
+std::string Utf8Substr(const std::string &s, size_t position, size_t length) {
+    size_t i = 0, start = s.size();
+    for (size_t cp = 0; cp < position && i < s.size(); ++cp) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        i += c < 0x80 ? 1 : (c < 0xE0 ? 2 : (c < 0xF0 ? 3 : 4));
+    }
+    start = i;
+    for (size_t cp = 0; cp < length && i < s.size(); ++cp) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        i += c < 0x80 ? 1 : (c < 0xE0 ? 2 : (c < 0xF0 ? 3 : 4));
+    }
+    return start <= i ? s.substr(start, i - start) : std::string();
+}
+
+std::string Base64Encode(const std::string &in) {
+    static const char *tbl =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((in.size() + 2) / 3 * 4);
+    for (size_t i = 0; i < in.size(); i += 3) {
+        const uint32_t b0 = static_cast<unsigned char>(in[i]);
+        const uint32_t b1 = i + 1 < in.size() ? static_cast<unsigned char>(in[i + 1]) : 0;
+        const uint32_t b2 = i + 2 < in.size() ? static_cast<unsigned char>(in[i + 2]) : 0;
+        const uint32_t v = (b0 << 16) | (b1 << 8) | b2;
+        out += tbl[(v >> 18) & 63];
+        out += tbl[(v >> 12) & 63];
+        out += i + 1 < in.size() ? tbl[(v >> 6) & 63] : '=';
+        out += i + 2 < in.size() ? tbl[v & 63] : '=';
+    }
+    return out;
+}
+
+std::string UrlEncode(const std::string &in) {
+    static const char *hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char b : in) {
+        if (std::isalnum(b) || b == '-' || b == '_' || b == '.' || b == '~') {
+            out += static_cast<char>(b);
+        } else {
+            out += '%';
+            out += hex[b >> 4];
+            out += hex[b & 15];
+        }
+    }
+    return out;
+}
+
+std::string UrlDecode(const std::string &in) {
+    std::string out;
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '%' && i + 2 < in.size()) {
+            auto nib = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            const int hi = nib(in[i + 1]), lo = nib(in[i + 2]);
+            if (hi >= 0 && lo >= 0) { out += static_cast<char>(hi * 16 + lo); i += 2; continue; }
+        }
+        out += in[i] == '+' ? ' ' : in[i];
+    }
+    return out;
+}
+
+// split `source` on `delimiter`, honouring a single-character escape.
+std::vector<std::string> SplitEscaped(const std::string &source, const std::string &delimiter,
+                                      const std::string &escape) {
+    std::vector<std::string> parts;
+    const char delim = delimiter.empty() ? ',' : delimiter[0];
+    const char esc = escape.empty() ? '\\' : escape[0];
+    std::string cur;
+    for (size_t i = 0; i < source.size(); ++i) {
+        if (source[i] == esc && i + 1 < source.size()) { cur += source[++i]; }
+        else if (source[i] == delim) { parts.push_back(cur); cur.clear(); }
+        else cur += source[i];
+    }
+    parts.push_back(cur);
+    return parts;
+}
+
 int LuaEngine::l_tag(lua_State *L) {
     LuaEngine *self = Self(L);
     if (!lua_istable(L, 2)) return 0;
@@ -758,9 +908,88 @@ int LuaEngine::l_tag(lua_State *L) {
         lua_getfield(L, 2, "system");
         const char *sys = lua_tostring(L, -1);
         if (name && sys) {
-            if (std::string(sys) == "delete") {
-                self->vars_.erase(name);
-            } else if (std::string(sys) == "date") {
+            auto field = [&](const char *k) -> std::string {
+                lua_getfield(L, 2, k);
+                const char *s = lua_tostring(L, -1);
+                std::string r = s ? s : "";
+                lua_pop(L, 1);
+                return r;
+            };
+            auto rfield = [&](const char *k) -> std::string {
+                return self->ResolveValue(field(k));
+            };
+            const std::string S(sys);
+            if (S == "delete") {
+                if (std::string(name).empty()) self->vars_.clear();
+                else self->vars_.erase(name);
+            } else if (S == "var_exist") {
+                const std::string target = field("target");
+                const bool exists = self->vars_.count(target) || self->sysvals_.count(target);
+                self->vars_[name] = exists ? "1" : "0";
+            } else if (S == "random") {
+                const long long mn = rfield("min").empty() ? 0 : std::strtoll(rfield("min").c_str(), nullptr, 0);
+                const std::string max_s = rfield("max");
+                const long long mx = max_s.empty() ? INT64_MAX : std::strtoll(max_s.c_str(), nullptr, 0);
+                long long v = mn;
+                if (mx > mn) v = mn + (static_cast<long long>(rand()) % (mx - mn + 1));
+                self->vars_[name] = std::to_string(v);
+            } else if (S == "length") {
+                const std::string src = rfield("source");
+                self->vars_[name] = std::to_string(field("mode") == "1"
+                                                       ? Utf8Length(src)
+                                                       : static_cast<int>(src.size()));
+            } else if (S == "find") {
+                const std::string src = rfield("source");
+                const std::string needle = rfield("string");
+                const size_t pos = src.find(needle);
+                self->vars_[name] = std::to_string(pos == std::string::npos ? -1
+                                                                               : static_cast<long long>(pos));
+            } else if (S == "substr") {
+                const std::string src = rfield("source");
+                const long long pos = std::strtoll(rfield("position").c_str(), nullptr, 0);
+                const std::string len_s = rfield("length");
+                const long long len = len_s.empty() ? static_cast<long long>(src.size())
+                                                    : std::strtoll(len_s.c_str(), nullptr, 0);
+                if (field("mode") == "1") {
+                    self->vars_[name] = Utf8Substr(src, pos < 0 ? 0 : static_cast<size_t>(pos),
+                                                   len < 0 ? 0 : static_cast<size_t>(len));
+                } else {
+                    const size_t start = pos < 0 ? 0 : std::min<size_t>(pos, src.size());
+                    const size_t end = std::min<size_t>(start + (len < 0 ? 0 : len), src.size());
+                    self->vars_[name] = src.substr(start, end - start);
+                }
+            } else if (S == "explode") {
+                const auto parts = SplitEscaped(rfield("source"), field("delimiter"), field("escape"));
+                for (size_t i = 0; i < parts.size(); ++i)
+                    self->vars_[std::string(name) + "." + std::to_string(i)] = parts[i];
+                self->vars_[std::string(name) + ".size"] = std::to_string(parts.size());
+            } else if (S == "unixtime") {
+                self->vars_[name] = std::to_string(static_cast<long long>(std::time(nullptr)));
+            } else if (S == "base64_encode") {
+                self->vars_[name] = Base64Encode(rfield("source"));
+            } else if (S == "url_encode") {
+                self->vars_[name] = UrlEncode(rfield("source"));
+            } else if (S == "url_decode") {
+                self->vars_[name] = UrlDecode(rfield("source"));
+            } else if (S == "fullscreen" || S == "minimize") {
+                self->vars_[name] = "0";
+            } else if (S == "screen_width") {
+                self->vars_[name] = self->sysvals_.count("screen_width")
+                                        ? self->sysvals_["screen_width"] : "1280";
+            } else if (S == "screen_height") {
+                self->vars_[name] = self->sysvals_.count("screen_height")
+                                        ? self->sysvals_["screen_height"] : "720";
+            } else if (S == "file_exist" || S == "file_exists") {
+                const std::string file = rfield("file");
+                bool exists = false;
+                if (file.size() >= 4) {
+                    std::string low = file;
+                    for (char &c : low) c = static_cast<char>(std::tolower((unsigned char)c));
+                    exists = low.compare(low.size() - 4, 4, ".exe") == 0;
+                }
+                if (!exists && self->packs_) exists = self->packs_->Exists(file);
+                self->vars_[name] = exists ? "1" : "0";
+            } else if (S == "date") {
                 // Save metadata reads six dotted calendar fields, not a Unix
                 // timestamp or the literal string "date". Use local wall time
                 // independently of the pausable monotonic animation clock.
@@ -793,10 +1022,19 @@ int LuaEngine::l_tag(lua_State *L) {
                     const auto info = self->compositor_->GetLayerInfo(lid);
                     if (info.found) {
                         const std::string nm(name);
+                        // The framework reads <name>.left/.top/.width/.height
+                        // (e.g. getTabletPos: e:var("t.ly.left")). Store the
+                        // bare name too for older callers.
                         self->vars_[nm] = std::to_string((int)info.left);
-                        // width/height are queried too (percent base)
+                        self->vars_[nm + ".left"] = std::to_string((int)info.left);
+                        self->vars_[nm + ".top"] = std::to_string((int)info.top);
                         self->vars_[nm + ".width"] = std::to_string((int)info.width);
                         self->vars_[nm + ".height"] = std::to_string((int)info.height);
+                        if (std::string(lid).find("zmask") != std::string::npos ||
+                            std::string(lid).find(".mw.tb") != std::string::npos)
+                            Log(kLogInfo, std::string("layer_info: ") + lid + " left=" +
+                                              std::to_string((int)info.left) + " width=" +
+                                              std::to_string((int)info.width));
                     }
                 }
             } else {
@@ -815,6 +1053,48 @@ int LuaEngine::l_tag(lua_State *L) {
         const int h = static_cast<int>(lua_tointeger(L, -1));
         if (h > 0) self->msg_layer_height_ = h;
         lua_pop(L, 1);
+    }
+    if (tagname == "prohibit") {
+        lua_getfield(L, 2, "head");
+        const char *head = lua_tostring(L, -1);
+        lua_getfield(L, 2, "foot");
+        const char *foot = lua_tostring(L, -1);
+        if (self->compositor_)
+            self->compositor_->SetProhibitRules(head ? head : "", foot ? foot : "");
+        lua_pop(L, 2);
+        return 0;
+    }
+    if (tagname == "wordparts") {
+        lua_getfield(L, 2, "parts");
+        const char *parts = lua_tostring(L, -1);
+        if (self->compositor_) self->compositor_->SetWordparts(parts ? parts : "");
+        lua_pop(L, 1);
+        return 0;
+    }
+    if (tagname == "indent") {
+        lua_getfield(L, 2, "pair");
+        const char *pair = lua_tostring(L, -1);
+        lua_getfield(L, 2, "range");
+        const int range = lua_isnil(L, -1) ? -1 : static_cast<int>(lua_tointeger(L, -1));
+        lua_getfield(L, 2, "nest");
+        const bool nest = lua_tointeger(L, -1) != 0;
+        if (self->compositor_)
+            self->compositor_->SetIndentRules(pair ? pair : "", range, nest);
+        lua_pop(L, 3);
+        return 0;
+    }
+    if (tagname == "lyrename") {
+        lua_getfield(L, 2, "id");
+        const char *id = lua_tostring(L, -1);
+        lua_getfield(L, 2, "to");
+        const char *to = lua_tostring(L, -1);
+        if (id && to && self->compositor_) self->compositor_->RenameLayer(id, to);
+        lua_pop(L, 2);
+        return 0;
+    }
+    if (tagname == "allsoundstop") {
+        if (self->audio_) self->audio_->StopAll();
+        return 0;
     }
     if (tagname == "debug") {
         lua_getfield(L, 2, "mode");
@@ -1210,6 +1490,87 @@ int LuaEngine::l_tag(lua_State *L) {
         }
         return 0;
     }
+    // Generic setonX/delonX registry (handler kinds without dedicated state).
+    if (inst && (tagname.rfind("seton", 0) == 0 || tagname.rfind("delon", 0) == 0)) {
+        const std::string key = tagname.substr(3); // drop the set/del prefix
+        if (key != "push" && key != "soundfinish" && key != "videofinish" &&
+            key != "automodein" && key != "automodeout") {
+            if (tagname.compare(0, 3, "set") == 0)
+                inst->named_events_[key] = {m.begin(), m.end()};
+            else
+                inst->named_events_.erase(key);
+            return 0;
+        }
+    }
+    if (tagname == "hide" && inst && inst->compositor_) {
+        const bool allow = !m.count("allow") || m["allow"] != "0";
+        // window= is a comma-separated layer list hidden while allow=1.
+        if (m.count("window")) {
+            const std::string &list = m.at("window");
+            auto trim = [](std::string v) {
+                size_t a = 0, b = v.size();
+                while (a < b && std::isspace(static_cast<unsigned char>(v[a]))) ++a;
+                while (b > a && std::isspace(static_cast<unsigned char>(v[b - 1]))) --b;
+                return v.substr(a, b - a);
+            };
+            size_t s = 0;
+            while (s <= list.size()) {
+                size_t e = list.find(',', s);
+                std::string id = trim(list.substr(s, e == std::string::npos ? std::string::npos : e - s));
+                if (!id.empty())
+                    inst->compositor_->SetProps(id, {{"visible", allow ? "0" : "1"}});
+                if (e == std::string::npos) break;
+                s = e + 1;
+            }
+        }
+        const bool want_hidden = !allow;
+        if (inst->hidden_ != want_hidden) {
+            inst->hidden_ = want_hidden;
+            inst->FireNamedEvent(want_hidden ? "onhidein" : "onhideout");
+        }
+        return 0;
+    }
+    if (tagname == "lyedit" && inst && inst->compositor_ && m.count("id")) {
+        // Replace a layer's image and/or restate its transform/alpha.
+        if (m.count("file")) inst->compositor_->LoadImage(m["id"], inst->ResolvePackPath(m["file"]));
+        std::map<std::string, std::string> props;
+        for (const char *k : {"left", "top", "alpha", "clip", "xscale", "yscale"})
+            if (m.count(k)) props[k] = m[k];
+        if (!props.empty()) inst->compositor_->SetProps(m["id"], props);
+        return 0;
+    }
+    if (tagname == "anime" && inst && inst->compositor_) {
+        const std::string id = m.count("id") ? m["id"] : "";
+        const std::string mode = m.count("mode") ? m["mode"] : "init";
+        const std::string file = m.count("file") ? inst->ResolvePackPath(m["file"]) : "";
+        const int time = std::atoi((m.count("time") ? m["time"]
+                                   : (m.count("0") ? m["0"] : "0")).c_str());
+        const int loop = m.count("loop") ? std::atoi(m["loop"].c_str()) : -1;
+        std::map<std::string, std::string> props;
+        for (const char *k : {"left", "top", "alpha", "clip", "anchorx", "anchory",
+                              "xscale", "yscale"})
+            if (m.count(k)) props[k] = m[k];
+        inst->compositor_->SetAnimeFrame(id, mode, file, time, loop, props, inst->NowMs());
+        return 0;
+    }
+    if (tagname == "uitrans" && inst && inst->compositor_) {
+        const std::string t = m.count("time") ? m["time"] : (m.count("0") ? m["0"] : "500");
+        const int time = std::atoi(t.c_str());
+        inst->transition_wait_ = true;
+        if (time > 0) inst->compositor_->BeginTransition(inst->NowMs(), time, {}, 0, 0, 0);
+        return 0;
+    }
+    // Recognized engine-informational / config tags: the framework owns their
+    // UI, so store nothing and let the script continue instead of dispatching
+    // them as unknown.
+    if (tagname == "scein" || tagname == "sceout" || tagname == "backlog" ||
+        tagname == "alreadyread" || tagname == "writebacklog" || tagname == "rclick" ||
+        tagname == "sysshow" || tagname == "syshide" || tagname == "loadmask" ||
+        tagname == "alldelete" || tagname == "repeatedly" ||
+        tagname == "autoskip_disable" || tagname == "macroadd" ||
+        tagname == "macrodel" || tagname == "loading" || tagname == "saving") {
+        return 0;
+    }
     if (tagname == "lydel" && m.count("id")) {
             inst->compositor_->DeleteLayer(m["id"]);
             // Drop click handlers of the deleted subtree (like the title
@@ -1288,12 +1649,15 @@ int LuaEngine::l_tag(lua_State *L) {
         // rasterizes `data` into the selected layer (engine-side text).
         // Accumulate the page, retaining explicit line breaks and layer style.
         if (tagname == "font" && inst) {
+            // [fontdefault] supplies fallbacks for any attribute the tag omits.
+            std::map<std::string, std::string> merged = inst->font_defaults_;
+            for (const auto &kv : m) merged[kv.first] = kv.second;
             // Load the face once. The tag restyles the CURRENT chgmsg layer;
             // fonts with show=none belong to hidden/off-screen slots (e.g.
             // top=-5 measure slots) and must never become the visible layout.
             if (!inst->font_loaded_) {
-                auto face = m.find("face");
-                if (face != m.end()) {
+                auto face = merged.find("face");
+                if (face != merged.end()) {
                     inst->compositor_->SetPackManager(inst->packs_);
                     if (inst->compositor_->LoadFont(
                             inst->ResolvePackPath(face->second)))
@@ -1301,16 +1665,52 @@ int LuaEngine::l_tag(lua_State *L) {
                 }
             }
             if (!inst->msg_layer_.empty())
-                for (const auto& kv : m) inst->font_of_[inst->msg_layer_][kv.first] = kv.second;
-            auto hidden = m.find("show");
-            if (hidden != m.end() && hidden->second == "none") return 0;
+                for (const auto& kv : merged) inst->font_of_[inst->msg_layer_][kv.first] = kv.second;
+            auto hidden = merged.find("show");
+            if (hidden != merged.end() && hidden->second == "none") return 0;
             auto &slot = [&]() -> std::map<std::string, std::string> & {
-                auto w = m.find("width");
-                return (w != m.end() && std::atof(w->second.c_str()) >= 700)
+                auto w = merged.find("width");
+                return (w != merged.end() && std::atof(w->second.c_str()) >= 700)
                            ? inst->font_main_
                            : inst->font_name_;
             }();
-            slot = {m.begin(), m.end()};
+            slot = merged;
+            return 0;
+        }
+        if (tagname == "fontdefault" && inst) {
+            inst->font_defaults_ = {m.begin(), m.end()};
+            return 0;
+        }
+        if (tagname == "fontinit" && inst) {
+            // Reset the current font state only. Per-layer rects registered by
+            // earlier chgmsg+font pairs must survive, or every set_textfont
+            // call would wipe the geometry of the layers before it.
+            inst->font_defaults_.clear();
+            inst->font_main_.clear();
+            inst->font_name_.clear();
+            if (!inst->msg_layer_.empty()) inst->font_of_.erase(inst->msg_layer_);
+            return 0;
+        }
+        if (tagname == "font_close" && inst) {
+            if (!inst->msg_layer_.empty()) inst->font_of_.erase(inst->msg_layer_);
+            return 0;
+        }
+        if (tagname == "glyph" && inst) {
+            inst->glyph_config_ = {m.begin(), m.end()};
+            return 0;
+        }
+        if (tagname == "link" && inst) {
+            inst->link_active_ = true;
+            inst->link_enabled_ = true;
+            inst->link_file_ = m.count("file") ? m["file"] : std::string();
+            inst->link_label_ = m.count("label") ? m["label"] : std::string();
+            return 0;
+        }
+        if (tagname == "/link" && inst) { inst->link_active_ = false; return 0; }
+        if (tagname == "linkdisable" && inst) { inst->link_enabled_ = false; return 0; }
+        if (tagname == "linkenable" && inst) { inst->link_enabled_ = true; return 0; }
+        if (tagname == "lydrag" && inst && inst->compositor_ && m.count("id")) {
+            inst->compositor_->SetProps(m["id"], {{"draggable", "1"}});
             return 0;
         }
         if (tagname == "chgmsg" && inst) {
@@ -1911,10 +2311,24 @@ void LuaEngine::DispatchClick(float x, float y) {
     if (id.empty()) id = compositor_->HitLayer(x, y);
     Log(kLogInfo, "click: hit='" + id + "' registered=" +
                       (FindLayerEvent(id, "click", nullptr) ? "yes" : "no"));
+    // [link] message text: clicking the message layer follows the link.
+    if (link_active_ && link_enabled_ && !msg_layer_.empty() && !link_label_.empty() &&
+        (id == msg_layer_ || id.rfind(msg_layer_ + ".", 0) == 0)) {
+        const std::string file = !link_file_.empty()
+            ? link_file_
+            : (script_runner_ ? script_runner_->CurrentFile() : std::string());
+        if (jump_handler_) jump_handler_(file, link_label_);
+        return;
+    }
     std::vector<std::pair<std::string, std::string>> attrs;
     if (id.empty() || !FindLayerEvent(id, "click", &attrs)) {
-        if (onpush_.count(1)) FireOnPush(1);
-        else AdvanceByInput();
+        // No button under the pointer: clear the framework's active-button
+        // cursor before routing the CLICK key. keyconfig only closes stateful
+        // UI (e.g. the volume slider's mwmute branch) when `func` is nil, and
+        // a stale cursor otherwise keeps the click bound to the last button.
+        DoString("if btn then btn.cursor=nil end", "clear-btn-cursor");
+        if (onpush_.count(1)) { Log(kLogInfo, "click: fallback -> onpush key 1"); FireOnPush(1); }
+        else { Log(kLogInfo, "click: fallback -> advance"); AdvanceByInput(); }
         return;
     }
     if (!FilterEvent("lyevent", attrs)) return;
@@ -1939,6 +2353,7 @@ void LuaEngine::DispatchClick(float x, float y) {
     if (lua_isstring(L_, -1)) exec = lua_tostring(L_, -1);
     lua_pop(L_, 1);
     if (!exec.empty()) {
+        Log(kLogInfo, "click: button exec path id='" + id + "' exec='" + exec + "'");
         // A real engine click event carries the pressed button as `btn` —
         // button handlers like langsel_click read p.btn (-> getBtnInfo) to
         // act. Our lyevent attrs only have `key`, so fold the key in.
@@ -1950,6 +2365,7 @@ void LuaEngine::DispatchClick(float x, float y) {
             if (kv.first == "click" && !kv.second.empty())
                 CallEvent(kv.second, click_attrs, false);
     } else {
+        Log(kLogInfo, "click: button cursor-sync path id='" + id + "' -> onpush key 1");
         for (const auto &kv : attrs)     // cursor-sync (function = btn_clickex)
             if (kv.first == "function" && !kv.second.empty())
                 CallEvent(kv.second, attrs, true);
@@ -1967,6 +2383,7 @@ void LuaEngine::FireOnPush(int key) {
     const uint64_t event=script_runner_ ? script_runner_->BeginEvent(*this) : 0;
     for (const auto &kv : attrs)
         if (kv.first == "function" && !kv.second.empty()) {
+            Log(kLogInfo, "onpush: key=" + std::to_string(key) + " -> " + kv.second);
             CallEvent(kv.second, attrs, false);
             break;
         }
@@ -1975,6 +2392,31 @@ void LuaEngine::FireOnPush(int key) {
 
 // ---- draggable layers (framework slider pins) ----
 
+// Hover model: the topmost layer under the pointer that owns a rollover event
+// gets its `over`/`function` handler; the previous layer gets its rollout
+// handler. The tablet dock arms its slide from tab_over, so a pointer entering
+// the handle must dispatch rollover or the bar never opens.
+void LuaEngine::HoverMove(float x, float y) {
+    if (!compositor_) return;
+    std::string id;
+    for (const std::string &cand : compositor_->HitLayers(x, y))
+        if (FindLayerEvent(cand, "rollover", nullptr)) { id = cand; break; }
+    if (id == hover_id_) return;
+    auto fire = [&](const std::string &layer, const char *type, const char *alias) {
+        std::vector<std::pair<std::string, std::string>> attrs;
+        if (layer.empty() || !FindLayerEvent(layer, type, &attrs)) return;
+        for (const auto &kv : attrs)
+            if ((kv.first == "function" || kv.first == alias) && !kv.second.empty()) {
+                Log(kLogInfo, std::string("hover: ") + type + " " + layer + " -> " + kv.second);
+                CallEvent(kv.second, attrs, true);
+                break;
+            }
+    };
+    if (!hover_id_.empty()) fire(hover_id_, "rollout", "out");
+    hover_id_ = id;
+    if (!id.empty()) fire(id, "rollover", "over");
+}
+
 // key-1 down over a draggable layer: record the grab and fire dragin.
 void LuaEngine::BeginDrag(float x, float y) {
     if (drag_id_.empty() && compositor_) {
@@ -1982,6 +2424,7 @@ void LuaEngine::BeginDrag(float x, float y) {
         const auto info = compositor_->GetLayerInfo(id);
         if (info.found && info.draggable) {
             drag_id_ = id;
+            drag_moved_ = false;
             drag_origin_x_ = x; drag_origin_y_ = y;
             drag_off_x_ = info.left; drag_off_y_ = info.top;
             Log(kLogInfo, "drag: begin " + id + " off=" +
@@ -2002,6 +2445,7 @@ void LuaEngine::BeginDrag(float x, float y) {
 // the drag handler (slider_dragX reads get_layer_info → percent → p4).
 void LuaEngine::DragMove(float x, float y) {
     if (drag_id_.empty() || !compositor_) return;
+    drag_moved_ = true;
     const auto info = compositor_->GetLayerInfo(drag_id_);
     if (!info.found) { EndDrag(); return; }
     float dx, dy;
@@ -2137,6 +2581,18 @@ void LuaEngine::SetAutoMode(bool enabled) {
     const auto token = script_runner_ ? script_runner_->BeginEvent(*this) : 0;
     if (!values["function"].empty()) CallEvent(values["function"], attrs, false);
     else if (!values["file"].empty()) DispatchTag(values["handler"] == "jump" ? "jump" : "call", attrs);
+    if (script_runner_) script_runner_->EndEvent(token);
+}
+
+void LuaEngine::FireNamedEvent(const std::string &key) {
+    const auto it = named_events_.find(key);
+    if (it == named_events_.end()) return;
+    const auto attrs = it->second; // callback can unregister itself
+    std::map<std::string, std::string> values(attrs.begin(), attrs.end());
+    const auto token = script_runner_ ? script_runner_->BeginEvent(*this) : 0;
+    if (!values["function"].empty()) CallEvent(values["function"], attrs, false);
+    else if (!values["file"].empty())
+        DispatchTag(values["handler"] == "jump" ? "jump" : "call", attrs);
     if (script_runner_) script_runner_->EndEvent(token);
 }
 
@@ -2347,6 +2803,9 @@ bool LuaEngine::LoadSnapshot(const std::string& file) {
             Log(kLogError,"load: unsupported saved layer command "+c.name);return false;
         }
     // Global/system banks belong to this installation, not to a scenario slot.
+    LoadPhase phase=LoadPhase::None;
+    auto advance=[&](LoadPhase next){ if(!ValidLoadTransition(phase,next)) Log(kLogWarn,std::string("load: phase order violated -> ")+LoadPhaseName(next)); phase=next; };
+    advance(LoadPhase::ResetEphemeral);
     for(auto it=vars_.begin();it!=vars_.end();) {
         const auto prefix=it->first.substr(0,2);
         if(prefix!="g." && prefix!="s.")it=vars_.erase(it);else ++it;
@@ -2355,11 +2814,13 @@ bool LuaEngine::LoadSnapshot(const std::string& file) {
         const auto prefix=v.first.substr(0,2);
         if(prefix!="g." && prefix!="s." && prefix!="t.")vars_[v.first]=std::move(v.second);
     }
+    advance(LoadPhase::RestoreData);
     tag_queue_.clear();SuspendWait();SetAutoMode(false);
     save_image_={};
     videos_.clear();emotes_.clear();audio_->StopAll();delete sounds_;sounds_=new AudioChannels(*audio_);
     onsoundfinish_.clear();pending_click_=false;drag_id_.clear();lyevents_.clear();
     if(script_runner_)script_runner_->DiscardFlow();
+    advance(LoadPhase::SnapshotScene);
     if(compositor_) {
         const int w=compositor_->StageWidth(),h=compositor_->StageHeight();
         compositor_->ReleaseGl();compositor_->Init(w,h);
@@ -2367,7 +2828,9 @@ bool LuaEngine::LoadSnapshot(const std::string& file) {
             DispatchTag(c.name,{c.attrs.begin(),c.attrs.end()});
     }
     // The registered framework callback reconstructs message pages, audio and
-    // the scenario cursor from its restored scr/log/btn graph (quickjump).
+    // the scenario cursor from its restored scr/log/btn graph (quickjump). [B]
+    // must run after [A] above or the replay would clobber it.
+    advance(LoadPhase::RebuildDerived);
     if(!CallEvent(handler->second,{{"file",file}},false)) return false;
     Log(kLogInfo,std::string("load: ")+(native?"native snapshot":"checkpoint")+" restored via onLoad: "+file+
         " layers="+std::to_string(snapshot.layers.size()));
@@ -2416,6 +2879,59 @@ int LuaEngine::l_random(lua_State *L) {
     // `t[ch]` in sysvo.lua was nil and START on the title screen aborted with
     // "attempt to index field '?'".
     lua_pushinteger(L, static_cast<lua_Integer>(rand()));
+    return 1;
+}
+
+// e:getScriptStatus() — 0..14 running/waiting state the framework polls.
+int LuaEngine::l_getScriptStatus(lua_State *L) {
+    LuaEngine *self = Self(L);
+    lua_pushinteger(L, self ? self->script_status_ : 0);
+    return 1;
+}
+
+int LuaEngine::l_setScriptStatus(lua_State *L) {
+    LuaEngine *self = Self(L);
+    if (self) self->script_status_ = static_cast<int>(luaL_checkinteger(L, 2));
+    return 0;
+}
+
+int LuaEngine::l_getScriptSize(lua_State *L) {
+    LuaEngine *self = Self(L);
+    const size_t size = self && self->script_runner_ ? self->script_runner_->Size() : 0;
+    lua_pushinteger(L, static_cast<lua_Integer>(size));
+    return 1;
+}
+
+int LuaEngine::l_getFrameNumber(lua_State *L) {
+    LuaEngine *self = Self(L);
+    lua_pushinteger(L, static_cast<lua_Integer>(self ? self->frame_number_ : 0));
+    return 1;
+}
+
+int LuaEngine::l_getTouchPoint(lua_State *L) {
+    LuaEngine *self = Self(L);
+    lua_pushnumber(L, self ? self->mouse_x_ : 0);
+    lua_pushnumber(L, self ? self->mouse_y_ : 0);
+    return 2;
+}
+
+int LuaEngine::l_setFlickSensitivity(lua_State *L) {
+    LuaEngine *self = Self(L);
+    if (self && lua_isnumber(L, 2))
+        self->flick_sensitivity_ = static_cast<float>(lua_tonumber(L, 2));
+    return 0;
+}
+
+// e:getScriptBlock() — describes the running script block. The framework uses
+// it for bookkeeping; expose the current file (empty when no runner).
+int LuaEngine::l_getScriptBlock(lua_State *L) {
+    LuaEngine *self = Self(L);
+    lua_newtable(L);
+    if (self && self->script_runner_) {
+        const std::string &file = self->script_runner_->CurrentFile();
+        lua_pushlstring(L, file.data(), file.size());
+        lua_setfield(L, -2, "file");
+    }
     return 1;
 }
 
@@ -2604,16 +3120,80 @@ bool LuaEngine::CallGlobalInternal(const std::string &fn, bool quiet) {
 }
 
 // Route an engine tag through the e:tag bridge (tag name = array item 1).
+int LuaEngine::FilterTag(const std::string &tag,
+                         const std::vector<std::pair<std::string, std::string>> &attrs,
+                         std::string *replacement) {
+    if (tag_filter_ref_ < 0) return 0;
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, tag_filter_ref_);
+    int nargs = 0;
+    if (lua_isfunction(L_, -1)) {
+        lua_getglobal(L_, kBridgeTable);
+        lua_pushlstring(L_, tag.data(), tag.size());
+        lua_newtable(L_);
+        for (const auto &kv : attrs) {
+            lua_pushlstring(L_, kv.second.data(), kv.second.size());
+            lua_setfield(L_, -2, kv.first.c_str());
+        }
+        nargs = 3;
+    } else if (lua_istable(L_, -1)) {
+        lua_getfield(L_, -1, tag.c_str());
+        if (!lua_isfunction(L_, -1)) { lua_pop(L_, 2); return 0; }
+        lua_getglobal(L_, kBridgeTable);
+        lua_newtable(L_);
+        for (const auto &kv : attrs) {
+            lua_pushlstring(L_, kv.second.data(), kv.second.size());
+            lua_setfield(L_, -2, kv.first.c_str());
+        }
+        lua_remove(L_, -4); // drop the filter table below fn/bridge/attrs
+        nargs = 2;
+    } else {
+        lua_pop(L_, 1);
+        return 0;
+    }
+    if (PCallTraceback(L_, nargs, 1) != 0) {
+        Log(kLogError, "tag filter " + tag + ": " + std::string(lua_tostring(L_, -1)));
+        lua_pop(L_, 1);
+        return 0; // allow on error
+    }
+    int result = 0;
+    if (lua_isboolean(L_, -1)) result = lua_toboolean(L_, -1) ? 1 : 0;
+    else if (lua_isnumber(L_, -1)) result = lua_tointeger(L_, -1) != 0 ? 1 : 0;
+    else if (lua_isstring(L_, -1)) {
+        if (replacement) *replacement = lua_tostring(L_, -1);
+        result = 2;
+    }
+    lua_pop(L_, 1);
+    return result;
+}
+
+int LuaEngine::l_setTagFilter(lua_State *L) {
+    auto *self = Self(L);
+    if (!lua_isnoneornil(L, 2) && !lua_isfunction(L, 2) && !lua_istable(L, 2))
+        return luaL_error(L, "setTagFilter expects a function, table or nil");
+    luaL_unref(L, LUA_REGISTRYINDEX, self->tag_filter_ref_);
+    if (lua_isnoneornil(L, 2)) lua_pushnil(L);
+    else lua_pushvalue(L, 2);
+    self->tag_filter_ref_ = luaL_ref(L, LUA_REGISTRYINDEX);
+    return 0;
+}
+
 bool LuaEngine::DispatchTag(const std::string &tag,
-                            const std::vector<std::pair<std::string, std::string>> &attrs) {
+                            const std::vector<std::pair<std::string, std::string>> &attrs,
+                            bool apply_filter) {
     if (!L_) return false;
+    std::string replacement;
+    if (apply_filter) {
+        const int filtered = FilterTag(tag, attrs, &replacement);
+        if (filtered == 1) return true; // intercepted
+    }
+    const std::string &effective = (apply_filter && !replacement.empty()) ? replacement : tag;
     lua_getglobal(L_, kBridgeTable);
     if (!lua_istable(L_, -1)) { lua_pop(L_, 1); return false; }
     lua_getfield(L_, -1, "tag");
     if (!lua_isfunction(L_, -1)) { lua_pop(L_, 2); return false; }
     lua_pushvalue(L_, -2);             // self
     lua_newtable(L_);                  // tag table
-    lua_pushlstring(L_, tag.c_str(), tag.size());
+    lua_pushlstring(L_, effective.c_str(), effective.size());
     lua_rawseti(L_, -2, 1);
     for (const auto &kv : attrs) {
         lua_pushlstring(L_, kv.first.c_str(), kv.first.size());
