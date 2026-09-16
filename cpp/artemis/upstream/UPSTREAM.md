@@ -1,26 +1,30 @@
 # artemis-compat (vendored)
 
 Upstream: https://github.com/Weiss-UltimateSavior/artemis-compat
-Pinned source commit: `2c44929ca854ec5dbab6f0727fb21179c62b4b4a`
+Pinned source baseline: `2c44929ca854ec5dbab6f0727fb21179c62b4b4a`
 (2026-09-14, compatibility fixes through the pre-host-dialog series)
+Selective pack backport: `2dcab320924738cab091ee027336559712a0944b`
+(persistent PF8 handle and O(1) entry lookup)
 License: GPL-3.0 (`LICENSE`), third-party components per `THIRD_PARTY_NOTICES.md`
 (Lua 5.1.5 — MIT; stb_vorbis — public domain / MIT).
 
 Only `src/` (minus `cli/` and `jni/`) and `third_party/` are vendored; the
 standalone `lua.c` / `luac.c` interpreters are removed.
 
-The source tree matches upstream through the pinned commit. Later upstream
-host-dialog and ownership/assembly refactors are intentionally deferred: they
-change the host callback contract, audio ownership and engine construction, so
-the HarmonyOS bridge and OHAudio backend need to migrate with them.
+The source tree matches upstream through the baseline, plus the PF8-only
+backport above. Later upstream host-dialog and ownership/assembly refactors are
+intentionally deferred: they change the host callback contract, audio ownership
+and engine construction, so the HarmonyOS bridge and OHAudio backend need to
+migrate with them.
 
 ## Integration notes and retained host patches
 
-At this pin, the portable directories under `src/` match upstream byte for
-byte. The list below records compatibility behavior this project relies on,
-including work that originated here and has since landed upstream. Remaining
-project-local differences live in the HarmonyOS backend, host bridge, build
-wiring and regression fixtures outside the vendored source tree.
+At this baseline, the portable directories under `src/` match upstream byte
+for byte except for the documented PF8 backport. The list below records
+compatibility behavior this project relies on, including work that originated
+here and has since landed upstream. Remaining project-local differences live in
+the HarmonyOS backend, host bridge, build wiring and regression fixtures outside
+the vendored source tree.
 
 - `src/log/logger.{h,cpp}` — added `artc::SetLogSink()` so the KrKr2-Next
   bridge can mirror engine output into its startup-log queue / engine log
