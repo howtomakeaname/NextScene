@@ -6,7 +6,9 @@
 #include <limits>
 #include <sstream>
 #if defined(ARTC_HAS_GLES)
-#include <GLES2/gl2.h>
+#include "render/gles2_headers.h"
+#include "render/shader_compat.h"
+#include "render/hlsl_glsl.h"
 #endif
 namespace artc {
 void LayerEffect::Set(const std::map<std::string,std::string>& attrs) {
@@ -88,7 +90,8 @@ std::vector<float> Numbers(std::string s) {
 void Uniform(uint32_t p,const char* name,float value) {glUniform1f(glGetUniformLocation(p,name),value);}
 }
 uint32_t LayerShaders::Compile(const std::string& source,bool wrap) {
-    std::string fragment=source;
+    // Artemis PC effects are an HLSL subset; adapt them to GLSL first.
+    std::string fragment=LooksLikeHlsl(source)?TranslateHlslToGlsl(source):source;
     if(wrap) {
         // Keep an optional #version as the first directive. Game shaders produce
         // straight RGBA; the wrapper applies group opacity exactly once and
@@ -99,7 +102,8 @@ uint32_t LayerShaders::Compile(const std::string& source,bool wrap) {
         fragment+="\n#undef main\nuniform lowp float artc_opacity;\nvoid main(){artc_game_main();gl_FragColor.a*=artc_opacity;gl_FragColor.rgb*=gl_FragColor.a;}\n";
     }
     auto shader=[](GLenum type,const std::string& code)->GLuint {
-        GLuint id=glCreateShader(type);const char* s=code.c_str();glShaderSource(id,1,&s,nullptr);glCompileShader(id);
+        const std::string adapted=ShaderSourceForBackend(code);
+        GLuint id=glCreateShader(type);const char* s=adapted.c_str();glShaderSource(id,1,&s,nullptr);glCompileShader(id);
         GLint ok=0;glGetShaderiv(id,GL_COMPILE_STATUS,&ok);
         if(!ok){char log[2048]={};glGetShaderInfoLog(id,sizeof(log),nullptr,log);
             Log(kLogError,std::string("layer shader compile: ")+log);glDeleteShader(id);return 0;}

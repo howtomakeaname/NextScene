@@ -65,6 +65,10 @@ struct Layer {
     std::string text;
     std::vector<TextGlyph> glyphs;
     std::vector<TextTween> text_in;
+    // Optional warped triangle list (interleaved x,y,u,v in layer-local
+    // pixels); when non-empty the layer is drawn as triangles instead of a quad
+    // (E-mote per-icon mesh warp).
+    std::vector<float> mesh;
 };
 
 class Compositor {
@@ -75,8 +79,15 @@ public:
     // Tag handlers (called from the Lua bridge on the engine thread).
     void SetPackManager(PackManager *packs) { packs_ = packs; }
     void SetSaveDirectory(const std::string& directory) { save_directory_=directory; }
+    // [prohibit]/[wordparts]/[indent]: configure CJK line-break rules. Empty
+    // sets fall back to the documented defaults.
+    void SetProhibitRules(const std::string& head, const std::string& foot);
+    void SetWordparts(const std::string& parts);
+    void SetIndentRules(const std::string& pair, int range, bool nest);
     bool LoadImage(const std::string &id, const std::string &file);
     bool LoadShader(const std::string& id, const std::string& file);
+    // [lyrename id=… to=…] — move a layer's state to a new id.
+    bool RenameLayer(const std::string& id, const std::string& to);
     bool SetPixels(const std::string& id, const uint8_t* rgba, int width, int height);
     // Capture the retained stage without redrawing the save/menu overlays.
     bool Snapshot(SnapshotImage& output) const;
@@ -97,6 +108,9 @@ public:
     void SetTextTween(const std::string& id, const std::map<std::string, std::string>& attrs);
     double PendingTextMs(double now_ms) const;
     bool FinishText(double now_ms);
+    // Override a layer's geometry with a warped triangle list (x,y,u,v per
+    // vertex, layer-local pixels). Empty restores the plain quad.
+    void SetLayerMesh(const std::string& id, const std::vector<float>& vertices);
 
     // GL draw (called from the render loop on the engine thread). Draws all
     // visible layers, then invokes the present callback ([flip] semantics).
@@ -183,6 +197,11 @@ public:
     void BeginTweenSet();
     void EndTweenSet(double now_ms);
     void DeleteTweens(const std::string &id);
+    // [anime] frame animation: init/add accumulate (time,file,props) frames,
+    // end sorts and starts playback. Frames switch the layer image/props.
+    void SetAnimeFrame(const std::string &id, const std::string &mode,
+                       const std::string &file, int time_ms, int loop,
+                       const std::map<std::string, std::string> &props, double now_ms);
     // Advance tweens/transition to `now_ms`; returns true when the picture
     // changed (the caller redraws). Call once per frame before Draw().
     bool Update(double now_ms);
@@ -242,6 +261,9 @@ private:
     void QueueTween(Tween tw, bool replace);
     static double TextEnd(const Layer& layer);
     void SetGlyphTimes(Layer& layer, std::vector<TextGlyph>& glyphs, const std::string& text);
+    bool IsProhibitHead(uint32_t cp) const;
+    bool IsProhibitFoot(uint32_t cp) const;
+    bool IsWordpart(uint32_t cp) const;
 
     int stage_w_ = 1280, stage_h_ = 720;
     LayerShaders shaders_;
@@ -253,9 +275,31 @@ private:
     TransProgram tprog_{};
     bool gl_ready_ = false;
 
+    // [prohibit]/[wordparts]/[indent] configuration (empty = documented default)
+    std::set<uint32_t> prohibit_head_, prohibit_foot_, wordparts_;
+    std::string indent_pair_;
+    int indent_range_ = -1;
+    bool indent_nest_ = false;
+
     std::vector<Tween> tweens_;
     bool collecting_tweens_ = false;
     std::vector<Tween> tween_set_;
+    // [anime] frame animation state per layer.
+    struct AnimeFrame {
+        double time_ms = 0;
+        std::string file;
+        std::map<std::string, std::string> props;
+    };
+    struct AnimeState {
+        std::vector<AnimeFrame> frames;
+        int loop = -1;
+        double start_ms = 0;
+        double total_ms = 0;
+        std::string active_file;
+        int active_index = -1;
+    };
+    std::map<std::string, AnimeState> anime_;
+    void AdvanceAnime(double now_ms, bool *changed);
     double now_ms_ = 0;
     // transition state
     bool trans_active_ = false;

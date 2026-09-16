@@ -1,5 +1,6 @@
 #include "render/compositor.h"
 #include "render/line_break.h"
+#include "render/layer_kind.h"
 #include "pack/pack_manager.h"
 #include "pack/pf8_reader.h"
 #include "log/logger.h"
@@ -12,7 +13,8 @@
 #endif
 
 #if defined(ARTC_HAS_GLES)
-#include <GLES2/gl2.h>
+#include "render/gles2_headers.h"
+#include "render/shader_compat.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "render/stb_image.h"
 #define STB_TRUETYPE_IMPLEMENTATION
@@ -193,60 +195,156 @@ std::string Compositor::HitLayer(float x, float y) const {
 // KrKr2-Next: tween engine (platform independent)
 // ---------------------------------------------------------------------------
 namespace {
-enum Ease { kEaseLinear = 0, kEaseInQuad, kEaseOutQuad, kEaseInOutQuad,
-            kEaseInCubic, kEaseOutCubic, kEaseInOutCubic, kEaseInSine,
-            kEaseOutSine, kEaseInOutSine, kEaseOutBack, kEaseOutBounce };
+// Artemis exposes 10 easing families (quad/cubic/quart/quint/expo/circ/sine/
+// back/elastic/bounce) in in/out/inout directions, plus linear. Encode a curve
+// as 1 + family*3 + direction so parsing and dispatch stay compact.
+enum EaseFamily { kFamQuad = 0, kFamCubic, kFamQuart, kFamQuint, kFamExpo,
+                  kFamCirc, kFamSine, kFamBack, kFamElastic, kFamBounce, kFamCount };
+enum EaseDir { kDirIn = 0, kDirOut, kDirInOut };
 
 int ParseEase(const std::string &name) {
-    if (name.empty() || name == "none" || name == "linear") return kEaseLinear;
-    if (name == "easein_quad") return kEaseInQuad;
-    if (name == "easeout_quad") return kEaseOutQuad;
-    if (name == "easeinout_quad") return kEaseInOutQuad;
-    if (name == "easein_cubic") return kEaseInCubic;
-    if (name == "easeout_cubic") return kEaseOutCubic;
-    if (name == "easeinout_cubic") return kEaseInOutCubic;
-    if (name == "easein_sine") return kEaseInSine;
-    if (name == "easeout_sine") return kEaseOutSine;
-    if (name == "easeinout_sine") return kEaseInOutSine;
-    if (name == "easeout_back") return kEaseOutBack;
-    if (name == "easeout_bounce") return kEaseOutBounce;
-    // unknown curve families (elastic, quart, expo...) fall back by direction
-    if (name.rfind("easein", 0) == 0 && name.find("out") == std::string::npos) return kEaseInQuad;
-    if (name.rfind("easeout", 0) == 0) return kEaseOutQuad;
-    return kEaseInOutQuad;
+    if (name.empty() || name == "none" || name == "linear") return 0;
+    std::string family = name;
+    int dir = kDirIn;
+    if (name.rfind("easeinout_", 0) == 0) { dir = kDirInOut; family = name.substr(10); }
+    else if (name.rfind("easein_", 0) == 0) { dir = kDirIn; family = name.substr(7); }
+    else if (name.rfind("easeout_", 0) == 0) { dir = kDirOut; family = name.substr(8); }
+    int fam = -1;
+    if (family == "quad") fam = kFamQuad;
+    else if (family == "cubic") fam = kFamCubic;
+    else if (family == "quart") fam = kFamQuart;
+    else if (family == "quint") fam = kFamQuint;
+    else if (family == "expo" || family == "exponential") fam = kFamExpo;
+    else if (family == "circ" || family == "circular") fam = kFamCirc;
+    else if (family == "sine" || family == "sin") fam = kFamSine;
+    else if (family == "back") fam = kFamBack;
+    else if (family == "elastic") fam = kFamElastic;
+    else if (family == "bounce") fam = kFamBounce;
+    if (fam < 0) return 0; // unknown -> linear
+    return 1 + fam * 3 + dir;
+}
+
+float OutBounce(float t) {
+    const float n1 = 7.5625f, d1 = 2.75f;
+    if (t < 1 / d1) return n1 * t * t;
+    if (t < 2 / d1) { t -= 1.5f / d1; return n1 * t * t + 0.75f; }
+    if (t < 2.5f / d1) { t -= 2.25f / d1; return n1 * t * t + 0.9375f; }
+    t -= 2.625f / d1; return n1 * t * t + 0.984375f;
+}
+
+float InBounce(float t) { return 1 - OutBounce(1 - t); }
+
+// In-direction curve for one family, in [0,1].
+float EaseIn(int fam, float t) {
+    const float pi = 3.14159265f;
+    switch (fam) {
+    case kFamQuad: return t * t;
+    case kFamCubic: return t * t * t;
+    case kFamQuart: return t * t * t * t;
+    case kFamQuint: { const float u = t * t; return u * u * t; }
+    case kFamExpo: return t <= 0 ? 0 : std::pow(2.0f, 10 * t - 10);
+    case kFamCirc: return 1 - std::sqrt(1 - t * t);
+    case kFamSine: return 1 - std::cos(t * pi / 2);
+    case kFamBack: { const float c1 = 1.70158f, c3 = c1 + 1; return c3 * t * t * t - c1 * t * t; }
+    case kFamElastic: {
+        if (t <= 0) return 0;
+        if (t >= 1) return 1;
+        const float c4 = (2 * pi) / 3;
+        return -std::pow(2.0f, 10 * t - 10) * std::sin((t * 10 - 10.75f) * c4);
+    }
+    case kFamBounce: return InBounce(t);
+    default: return t;
+    }
 }
 
 float ApplyEase(int ease, float t) {
     if (t <= 0) return 0;
     if (t >= 1) return 1;
+    if (ease <= 0) return t; // linear
+    const int fam = (ease - 1) / 3;
+    const int dir = (ease - 1) % 3;
+    if (dir == kDirIn) return EaseIn(fam, t);
+    if (dir == kDirOut) return 1 - EaseIn(fam, 1 - t);
+    // inout: back/elastic/bounce use a widened-parameter blend, the rest are
+    // the reflected in-curve across the midpoint.
     const float pi = 3.14159265f;
-    switch (ease) {
-    case kEaseInQuad: return t * t;
-    case kEaseOutQuad: return 1 - (1 - t) * (1 - t);
-    case kEaseInOutQuad: return t < 0.5f ? 2 * t * t : 1 - (-2 * t + 2) * (-2 * t + 2) / 2;
-    case kEaseInCubic: return t * t * t;
-    case kEaseOutCubic: { const float u = 1 - t; return 1 - u * u * u; }
-    case kEaseInOutCubic: return t < 0.5f ? 4 * t * t * t : 1 - (-2 * t + 2) * (-2 * t + 2) * (-2 * t + 2) / 2;
-    case kEaseInSine: return 1 - std::cos(t * pi / 2);
-    case kEaseOutSine: return std::sin(t * pi / 2);
-    case kEaseInOutSine: return -(std::cos(pi * t) - 1) / 2;
-    case kEaseOutBack: { const float c1 = 1.70158f, c3 = c1 + 1; const float u = t - 1;
-                         return 1 + c3 * u * u * u + c1 * u * u; }
-    case kEaseOutBounce: {
-        const float n1 = 7.5625f, d1 = 2.75f;
-        if (t < 1 / d1) return n1 * t * t;
-        if (t < 2 / d1) { t -= 1.5f / d1; return n1 * t * t + 0.75f; }
-        if (t < 2.5f / d1) { t -= 2.25f / d1; return n1 * t * t + 0.9375f; }
-        t -= 2.625f / d1; return n1 * t * t + 0.984375f;
+    if (fam == kFamBack) {
+        const float c1 = 1.70158f, c2 = c1 * 1.525f;
+        return t < 0.5f
+                   ? (std::pow(2 * t, 2) * ((c2 + 1) * 2 * t - c2)) / 2
+                   : (std::pow(2 * t - 2, 2) * ((c2 + 1) * (2 * t - 2) + c2) + 2) / 2;
     }
-    default: return t;
+    if (fam == kFamElastic) {
+        const float c5 = (2 * pi) / 4.5f;
+        return t < 0.5f
+                   ? -(std::pow(2.0f, 20 * t - 10) * std::sin((20 * t - 11.125f) * c5)) / 2
+                   : (std::pow(2.0f, -20 * t + 10) * std::sin((20 * t - 11.125f) * c5)) / 2 + 1;
     }
+    if (fam == kFamBounce)
+        return t < 0.5f ? (1 - InBounce(1 - 2 * t)) / 2
+                        : (1 + OutBounce(2 * t - 1)) / 2;
+    return t < 0.5f ? EaseIn(fam, t * 2) / 2
+                    : 1 - EaseIn(fam, (1 - t) * 2) / 2;
 }
 
 float ToF(const std::string &s, float def = 0) {
     try { return s.empty() ? def : std::stof(s); } catch (...) { return def; }
 }
 } // namespace
+
+bool Compositor::IsProhibitHead(uint32_t cp) const {
+    return prohibit_head_.empty() ? ProhibitLineStart(cp) : prohibit_head_.count(cp) != 0;
+}
+bool Compositor::IsProhibitFoot(uint32_t cp) const {
+    return prohibit_foot_.empty() ? ProhibitLineEnd(cp) : prohibit_foot_.count(cp) != 0;
+}
+bool Compositor::IsWordpart(uint32_t cp) const {
+    return wordparts_.count(cp) != 0;
+}
+
+namespace {
+std::vector<uint32_t> DecodeUtf8Codepoints(const std::string &s) {
+    std::vector<uint32_t> out;
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        uint32_t cp = c;
+        size_t n = 1;
+        if (c >= 0xF0) { cp = c & 0x07; n = 4; }
+        else if (c >= 0xE0) { cp = c & 0x0F; n = 3; }
+        else if (c >= 0xC0) { cp = c & 0x1F; n = 2; }
+        for (size_t k = 1; k < n && i + k < s.size(); ++k)
+            cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F);
+        out.push_back(cp);
+        i += n;
+    }
+    return out;
+}
+} // namespace
+
+void Compositor::SetProhibitRules(const std::string &head, const std::string &foot) {
+    prohibit_head_.clear();
+    prohibit_foot_.clear();
+    for (uint32_t cp : DecodeUtf8Codepoints(head)) prohibit_head_.insert(cp);
+    for (uint32_t cp : DecodeUtf8Codepoints(foot)) prohibit_foot_.insert(cp);
+}
+void Compositor::SetWordparts(const std::string &parts) {
+    wordparts_.clear();
+    for (uint32_t cp : DecodeUtf8Codepoints(parts)) wordparts_.insert(cp);
+}
+void Compositor::SetIndentRules(const std::string &pair, int range, bool nest) {
+    indent_pair_ = pair;
+    indent_range_ = range;
+    indent_nest_ = nest;
+}
+
+void Compositor::SetLayerMesh(const std::string &id, const std::vector<float> &vertices) {
+    if (id.empty()) return;
+    for (auto &l : layers_)
+        if (l.id == id) {
+            if (l.mesh != vertices) { l.mesh = vertices; ++revision_; }
+            return;
+        }
+}
 
 void Compositor::SetTextTween(const std::string& id, const std::map<std::string, std::string>& attrs) {
     if (id.empty()) return;
@@ -436,6 +534,71 @@ void Compositor::DeleteTweens(const std::string &id) {
     }
 }
 
+void Compositor::SetAnimeFrame(const std::string &id, const std::string &mode,
+                               const std::string &file, int time_ms, int loop,
+                               const std::map<std::string, std::string> &props,
+                               double now_ms) {
+    if (id.empty()) return;
+    ++revision_;
+    AnimeState &st = anime_[id];
+    if (mode == "init") {
+        st = AnimeState();
+        st.loop = loop;
+        st.frames.push_back({static_cast<double>(time_ms), file, props});
+        if (!file.empty()) LoadImage(id, file);
+        if (!props.empty()) SetProps(id, props);
+        st.active_file = file;
+        st.active_index = 0;
+    } else if (mode == "add") {
+        st.frames.push_back({static_cast<double>(time_ms), file, props});
+    } else if (mode == "end") {
+        std::stable_sort(st.frames.begin(), st.frames.end(),
+                         [](const AnimeFrame &a, const AnimeFrame &b) {
+                             return a.time_ms < b.time_ms;
+                         });
+        st.total_ms = time_ms > 0 ? time_ms
+                     : (st.frames.empty() ? 0 : st.frames.back().time_ms);
+        st.start_ms = now_ms;
+        st.active_index = -1;
+        st.active_file.clear();
+        bool changed = false;
+        AdvanceAnime(now_ms, &changed);
+    }
+}
+
+void Compositor::AdvanceAnime(double now_ms, bool *changed) {
+    std::vector<std::string> gone;
+    for (auto &entry : anime_) {
+        AnimeState &st = entry.second;
+        if (st.frames.empty() || st.total_ms <= 0) continue;
+        bool exists = false;
+        for (const auto &l : layers_) if (l.id == entry.first) { exists = true; break; }
+        if (!exists) { gone.push_back(entry.first); continue; }
+        const double elapsed = now_ms - st.start_ms;
+        double t;
+        if (st.loop < 0) {
+            t = elapsed > 0 ? std::fmod(elapsed, st.total_ms) : 0;
+        } else {
+            const double rounds = st.loop == 0 ? 1 : static_cast<double>(st.loop);
+            if (elapsed >= st.total_ms * rounds) t = st.total_ms; // hold last
+            else t = elapsed > 0 ? std::fmod(elapsed, st.total_ms) : 0;
+        }
+        int index = 0;
+        for (size_t i = 0; i < st.frames.size(); ++i)
+            if (st.frames[i].time_ms <= t) index = static_cast<int>(i);
+        if (index == st.active_index) continue;
+        const AnimeFrame &f = st.frames[index];
+        if (!f.file.empty() && f.file != st.active_file) {
+            LoadImage(entry.first, f.file);
+            st.active_file = f.file;
+        }
+        if (!f.props.empty()) SetProps(entry.first, f.props);
+        st.active_index = index;
+        if (changed) *changed = true;
+    }
+    for (const auto &id : gone) anime_.erase(id);
+}
+
 bool Compositor::Update(double now_ms) {
     bool changed = PendingTextMs(now_ms_) > 0;
     now_ms_ = now_ms;
@@ -473,6 +636,7 @@ bool Compositor::Update(double now_ms) {
         if (now_ms - trans_start_ms_ >= trans_time_ms_) trans_active_ = false;
         changed = true;   // the overlay fades every frame (or just went away)
     }
+    AdvanceAnime(now_ms, &changed);
     if (changed) ++revision_;
     return changed;
 }
@@ -508,8 +672,8 @@ std::string Compositor::DescribeDrawList(size_t max_layers) const {
         if (!ev || !l->texture) continue;
         if (n++ >= max_layers) { out += " ..."; break; }
         char buf[160];
-        std::snprintf(buf, sizeof(buf), " %s(%d,%d %dx%d a=%.2f)", l->id.c_str(), (int)ex, (int)ey,
-                      (int)ew, (int)eh, ea);
+        std::snprintf(buf, sizeof(buf), " %s[%s](%d,%d %dx%d a=%.2f)", l->id.c_str(),
+                      KindName(KindOf(*l)), (int)ex, (int)ey, (int)ew, (int)eh, ea);
         out += buf;
     }
     return out;
@@ -622,8 +786,10 @@ void main() {
 // Artemis layer ids sort by their leading integer ("600.4.0" → 600,
 // "1.80.mw" → 1, "-273" → -273); non-numeric ids keep insertion order.
 uint32_t CompileShader(uint32_t type, const char *src) {
+    const std::string code = ShaderSourceForBackend(src);
+    const char *text = code.c_str();
     uint32_t s = glCreateShader(type);
-    glShaderSource(s, 1, &src, nullptr);
+    glShaderSource(s, 1, &text, nullptr);
     glCompileShader(s);
     return s;
 }
@@ -997,20 +1163,32 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
         units.push_back({k,end,group ? group->width : advances[k],group});k=end;
     }
     const bool prohibit=number("prohibit",0)!=0, hung=number("hung",0)!=0;
-    int pen = 0, line = 0;
+    // [indent] hanging indent: an opening pair character shifts following
+    // (wrapped or explicit) lines to its right edge until the matching close.
+    const std::vector<uint32_t> indent_pairs=DecodeUtf8Codepoints(indent_pair_);
+    auto indent_open=[&](uint32_t cp,uint32_t* close)->bool {
+        if(indent_pairs.size()<2)return false;
+        for(size_t i=0;i+1<indent_pairs.size();i+=2)
+            if(indent_pairs[i]==cp){*close=indent_pairs[i+1];return true;}
+        return false;
+    };
+    int pen = 0, line = 0, indent_x = 0;
+    int chars_in_line = 0;
+    std::vector<std::pair<uint32_t,int>> indent_stack; // {expected close, prior indent}
     for(size_t u=0;u<units.size();) {
         const size_t k=units[u].first;
-        if(cps[k]=='\n') {lx[k]=-1;pen=0;++line;line_w.push_back(0);++u;continue;}
+        if(cps[k]=='\n') {lx[k]=-1;pen=indent_x;++line;line_w.push_back(0);chars_in_line=0;++u;continue;}
         size_t end=u+1;int width=units[u].width;
         // Keep an opening bracket with its following text, and a closing
         // mark with the preceding text. Ruby remains one indivisible unit.
         while(prohibit && end<units.size() && cps[units[end].first]!='\n' &&
-              (ProhibitLineEnd(cps[units[end-1].last-1]) ||
-               (ProhibitLineStart(cps[units[end].first]) && !(hung && HangPunctuation(cps[units[end].first]))))) {
+              (IsProhibitFoot(cps[units[end-1].last-1]) ||
+               IsWordpart(cps[units[end-1].last-1]) && IsWordpart(cps[units[end].first]) ||
+               (IsProhibitHead(cps[units[end].first]) && !(hung && HangPunctuation(cps[units[end].first]))))) {
             width+=units[end].width;++end;
         }
         if(pen>0 && wrapWidth>0 && pen+width>wrapWidth && !(hung && HangPunctuation(cps[k]))) {
-            pen=0;++line;line_w.push_back(0);
+            pen=indent_x;++line;line_w.push_back(0);chars_in_line=0;
         }
         for(;u<end;++u) {
             const auto& unit=units[u];
@@ -1025,8 +1203,22 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
               for(size_t j=group->glyph_first;j<group->glyph_last;++j) {
                   lx[j]=ruby_pen; ly[j]=line; ruby_pen+=advances[j];
               }
+              chars_in_line+=static_cast<int>(group->last-group->first);
             } else {
               lx[unit.first]=pen;ly[unit.first]=line;
+              const uint32_t base_cp=cps[unit.first];
+              uint32_t close=0;
+              if(indent_open(base_cp,&close)) {
+                  const bool within=indent_range_<0 || chars_in_line<indent_range_;
+                  if(within && (indent_stack.empty() || indent_nest_)) {
+                      indent_stack.push_back({close,indent_x});
+                      indent_x=pen+advances[unit.first];
+                  }
+              } else if(!indent_stack.empty() && indent_stack.back().first==base_cp) {
+                  indent_x=indent_stack.back().second;
+                  indent_stack.pop_back();
+              }
+              ++chars_in_line;
             }
             pen+=unit.width;line_w[line]=std::max(line_w[line],pen);
         }
@@ -1223,6 +1415,26 @@ void Compositor::DeleteLayer(const std::string &id) {
     }
 }
 
+bool Compositor::RenameLayer(const std::string &id, const std::string &to) {
+    if (id.empty() || to.empty() || id == to) return false;
+    ++revision_;
+    bool any = false;
+    const std::string prefix = id + ".";
+    for (auto &l : layers_) {
+        if (l.id == id) { l.id = to; any = true; }
+        else if (l.id.compare(0, prefix.size(), prefix) == 0) {
+            l.id = to + l.id.substr(id.size());
+            any = true;
+        }
+    }
+    for (auto &tw : tweens_) {
+        if (tw.id == id) tw.id = to;
+        else if (tw.id.compare(0, prefix.size(), prefix) == 0)
+            tw.id = to + tw.id.substr(id.size());
+    }
+    return any;
+}
+
 void Compositor::ReleaseGl() {
     shaders_.ReleaseGl();
     for(auto& mask:masks_)if(mask.second.texture)glDeleteTextures(1,&mask.second.texture);
@@ -1364,6 +1576,30 @@ void Compositor::Draw() {
                 glDrawArrays(GL_TRIANGLES,0,vertices.size()/5);
                 glDisableVertexAttribArray(prog_.a_opacity);
                 glVertexAttrib1f(prog_.a_opacity,1);
+            }
+            return;
+        }
+        if (!l->mesh.empty() && l->mesh.size() % 4 == 0) {
+            // Warped triangle list (E-mote mesh): transform every vertex and
+            // draw with per-vertex uv.
+            std::vector<float> vertices;
+            vertices.reserve(l->mesh.size() / 4 * 5);
+            for (size_t i = 0; i + 3 < l->mesh.size(); i += 4) {
+                const auto p = transform.Point(l->mesh[i], l->mesh[i + 1]);
+                vertices.insert(vertices.end(),
+                                {p.first, p.second, l->mesh[i + 2], l->mesh[i + 3], 1.0f});
+            }
+            if (!vertices.empty()) {
+                glUniform1f(prog_.u_alpha, ea);
+                glVertexAttribPointer(prog_.a_pos, 2, GL_FLOAT, GL_FALSE, 20, vertices.data());
+                glEnableVertexAttribArray(prog_.a_pos);
+                glVertexAttribPointer(prog_.a_uv, 2, GL_FLOAT, GL_FALSE, 20, vertices.data() + 2);
+                glEnableVertexAttribArray(prog_.a_uv);
+                glVertexAttribPointer(prog_.a_opacity, 1, GL_FLOAT, GL_FALSE, 20, vertices.data() + 4);
+                glEnableVertexAttribArray(prog_.a_opacity);
+                glDrawArrays(GL_TRIANGLES, 0, vertices.size() / 5);
+                glDisableVertexAttribArray(prog_.a_opacity);
+                glVertexAttrib1f(prog_.a_opacity, 1);
             }
             return;
         }
@@ -1608,6 +1844,20 @@ void Compositor::DeleteLayer(const std::string &id) {
             ++it;
         }
     }
+}
+bool Compositor::RenameLayer(const std::string &id, const std::string &to) {
+    if (id.empty() || to.empty() || id == to) return false;
+    ++revision_;
+    bool any = false;
+    const std::string prefix = id + ".";
+    for (auto &l : layers_) {
+        if (l.id == id) { l.id = to; any = true; }
+        else if (l.id.compare(0, prefix.size(), prefix) == 0) {
+            l.id = to + l.id.substr(id.size());
+            any = true;
+        }
+    }
+    return any;
 }
 bool Compositor::LoadFont(const std::string &file) {
     Log(kLogInfo, "font (host, no raster): " + file);
