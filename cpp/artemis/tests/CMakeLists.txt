@@ -14,6 +14,50 @@ target_compile_definitions(audio_stream_regressions PRIVATE ARTC_TEST_DATA="${AR
 target_link_libraries(audio_stream_regressions PRIVATE artemis_core)
 add_test(NAME audio_stream_regressions COMMAND audio_stream_regressions)
 
+add_executable(pf8_regressions pf8_regressions.cpp)
+target_link_libraries(pf8_regressions PRIVATE artemis_core)
+add_test(NAME pf8_regressions COMMAND pf8_regressions)
+
+add_executable(preprocess_regressions preprocess_regressions.cpp)
+target_link_libraries(preprocess_regressions PRIVATE artemis_core)
+add_test(NAME preprocess_regressions COMMAND preprocess_regressions)
+
+add_executable(psb_encrypted_regressions psb_encrypted_regressions.cpp)
+target_link_libraries(psb_encrypted_regressions PRIVATE artemis_core)
+add_test(NAME psb_encrypted_regressions COMMAND psb_encrypted_regressions)
+
+add_executable(hlsl_glsl_regressions hlsl_glsl_regressions.cpp)
+target_link_libraries(hlsl_glsl_regressions PRIVATE artemis_core)
+add_test(NAME hlsl_glsl_regressions COMMAND hlsl_glsl_regressions)
+
+add_executable(emote_mesh_regressions emote_mesh_regressions.cpp)
+target_link_libraries(emote_mesh_regressions PRIVATE artemis_core)
+add_test(NAME emote_mesh_regressions COMMAND emote_mesh_regressions)
+
+add_executable(block_decode_regressions block_decode_regressions.cpp)
+target_link_libraries(block_decode_regressions PRIVATE artemis_core)
+add_test(NAME block_decode_regressions COMMAND block_decode_regressions)
+
+add_executable(layer_kind_regressions layer_kind_regressions.cpp)
+target_link_libraries(layer_kind_regressions PRIVATE artemis_core)
+add_test(NAME layer_kind_regressions COMMAND layer_kind_regressions)
+
+add_executable(expression_regressions expression_regressions.cpp)
+target_link_libraries(expression_regressions PRIVATE artemis_core)
+add_test(NAME expression_regressions COMMAND expression_regressions)
+
+add_executable(text_rules_regressions text_rules_regressions.cpp)
+target_link_libraries(text_rules_regressions PRIVATE artemis_core)
+add_test(NAME text_rules_regressions COMMAND text_rules_regressions)
+
+add_executable(emote_timeline_regressions emote_timeline_regressions.cpp)
+target_link_libraries(emote_timeline_regressions PRIVATE artemis_core)
+add_test(NAME emote_timeline_regressions COMMAND emote_timeline_regressions)
+
+add_executable(runtime_state_regressions runtime_state_regressions.cpp)
+target_link_libraries(runtime_state_regressions PRIVATE artemis_core)
+add_test(NAME runtime_state_regressions COMMAND runtime_state_regressions)
+
 get_target_property(ARTC_DEFINES artemis_core INTERFACE_COMPILE_DEFINITIONS)
 if("ARTC_HAS_FFMPEG=1" IN_LIST ARTC_DEFINES)
     find_program(ARTC_FFMPEG_TOOL ffmpeg)
