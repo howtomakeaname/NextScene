@@ -1,10 +1,14 @@
 #include "script/asb_parser.h"
 #include "script/lua_engine.h"
+#include "script/preprocess.h"
+#include "util/encoding.h"
 
 #include "log/logger.h"
 #include "pack/pack_manager.h"
 
 #include <cstring>
+#include <cctype>
+#include <cstdlib>
 
 namespace artc {
 
@@ -86,8 +90,12 @@ bool AsbRunner::Load(const std::vector<uint8_t> &image, const std::string &label
     const bool binary = image.size() > 4 && image[0] == 'A' && image[1] == 'S' &&
                         image[2] == 'B' && image[3] == '\0';
     const bool ok = binary ? ParseAsb(image, &script_)
-                           : ParseIetScript(
-                                 std::string(image.begin(), image.end()), &script_);
+                           : [&] {
+                                 std::string decoded;
+                                 DecodeToUtf8(std::string(image.begin(), image.end()),
+                                              TextCharset(), decoded);
+                                 return ParseIetScript(PreprocessScript(decoded), &script_);
+                             }();
     if (!ok) {
         Log(kLogError, "asb: image parse failed");
         return false;
@@ -220,18 +228,67 @@ void AsbRunner::JumpTo(const std::string &label) {
     else Log(kLogWarn, "asb: jump target not found: " + label);
 }
 
+void AsbRunner::GotoIndex(size_t index) {
+    if (index > script_.lines.size()) {
+        Log(kLogWarn, "asb: compiled branch target out of range: " +
+                          std::to_string(index));
+        Halt();
+        return;
+    }
+    ++flow_revision_;
+    halted_ = false;
+    pc_ = index;
+}
+
+namespace {
+// Compiled ASB branch/loop metadata is keyed with a leading vertical tab.
+constexpr const char *kBranchPrefix = "\x0b";
+
+std::string Attr(const AsbLine &line, const char *name) {
+    for (const auto &kv : line.attrs)
+        if (kv.first == name) return kv.second;
+    return std::string();
+}
+
+// `estimate` without a leading '$' is a plain numeric parameter: it reads the
+// leading integer, or 0 when there is none (verified against the original
+// engine). With a '$' it is an Artemis expression.
+bool EstimateTrue(LuaEngine &lua, const std::string &estimate) {
+    if (estimate.empty()) return true;
+    if (estimate.front() != '$') {
+        size_t i = 0;
+        while (i < estimate.size() &&
+               std::isspace(static_cast<unsigned char>(estimate[i]))) ++i;
+        const size_t start = i;
+        if (i < estimate.size() && (estimate[i] == '+' || estimate[i] == '-')) ++i;
+        const size_t digits = i;
+        while (i < estimate.size() && std::isdigit(static_cast<unsigned char>(estimate[i]))) ++i;
+        if (i == digits) return false; // no leading number -> 0
+        return std::strtoll(estimate.substr(start, i - start).c_str(), nullptr, 10) != 0;
+    }
+    const std::string result = lua.ResolveValue(estimate);
+    if (result.empty()) return false;
+    char *end = nullptr;
+    const long long n = std::strtoll(result.c_str(), &end, 0);
+    if (end == result.c_str() + result.size()) return n != 0;
+    return true; // non-numeric, non-empty string is truthy
+}
+} // namespace
+
 bool AsbRunner::ExecuteLine(LuaEngine& lua) {
     if (!loaded_ || halted_ || pc_ >= script_.lines.size()) { halted_ = true; return false; }
     const uint64_t before = flow_revision_;
     const AsbLine line = Current(); // callbacks can replace script_ in this call
-    auto attr = [&](const char* name) {
-        for (const auto& kv : line.attrs) if (kv.first == name) return kv.second;
-        return std::string();
-    };
+    auto attr = [&](const char* name) { return Attr(line, name); };
     if (line.is_label) {
         Advance();
         return true;
     }
+    // Compiled control flow. Text .iet scripts have no \x0bindex metadata, so
+    // this only engages for compiled records and leaves text behavior intact.
+    const std::string index_attr =
+        attr((std::string(kBranchPrefix) + "index").c_str());
+    const std::string branch_index = index_attr.empty() ? attr("index") : index_attr;
     if (line.command == "\x02LUA") lua.DoString(attr("code"), "asb:lua");
     else if (line.command == "calllua") lua.CallGlobal(attr("function"));
     else if (line.command == "jump" || line.command == "call") {
@@ -246,6 +303,27 @@ bool AsbRunner::ExecuteLine(LuaEngine& lua) {
     } else if (line.command == "return") {
         if (!Return()) Halt();
         return true;
+    } else if (line.command == "if" || line.command == "elseif" ||
+               line.command == "loop") {
+        if (!branch_index.empty()) {
+            if (!EstimateTrue(lua, attr("estimate"))) {
+                GotoIndex(static_cast<size_t>(std::strtoull(branch_index.c_str(), nullptr, 10)));
+                return true;
+            }
+            // condition true: fall through into the branch body
+        } else if (line.command != "stop") {
+            lua.DispatchTag(line.command, line.attrs);
+        }
+    } else if (line.command == std::string(kBranchPrefix) + "goto" ||
+               line.command == "goto") {
+        if (branch_index.empty()) {
+            lua.DispatchTag(line.command, line.attrs);
+        } else {
+            GotoIndex(static_cast<size_t>(std::strtoull(branch_index.c_str(), nullptr, 10)));
+            return true;
+        }
+    } else if (line.command == "else") {
+        // fall through (reached only when no earlier branch was taken)
     } else if (line.command != "stop") {
         lua.DispatchTag(line.command, line.attrs);
     }
