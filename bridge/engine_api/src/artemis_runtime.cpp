@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <dirent.h>
@@ -36,6 +37,12 @@
 #include "script/lua_engine.h"
 
 #include "visual/ogl/krkr_egl_context.h"
+#if defined(__ANDROID__)
+#include "AndroidDocumentStorage.h"
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace krkr2_artemis {
 
@@ -92,6 +99,44 @@ std::vector<std::string> ListBasePacks(const std::string& dir) {
   return found;
 }
 
+#if defined(__ANDROID__)
+bool ReadDocument(const std::string& path, std::vector<uint8_t>& out) {
+  const int fd = krkr::documents::open(path.c_str(), O_RDONLY);
+  if (fd < 0) return false;
+  struct stat info {};
+  if (fstat(fd, &info) != 0 || info.st_size < 0 || info.st_size > 0x7fffffff) {
+    close(fd);
+    return false;
+  }
+  out.resize(static_cast<size_t>(info.st_size));
+  size_t done = 0;
+  while (done < out.size()) {
+    const ssize_t n = pread(fd, out.data() + done, out.size() - done,
+                            static_cast<off_t>(done));
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) { close(fd); out.clear(); return false; }
+    done += static_cast<size_t>(n);
+  }
+  close(fd);
+  return true;
+}
+
+artc::PackManager::FileProvider AndroidDocumentProvider() {
+  artc::PackManager::FileProvider provider;
+  provider.openRead = [](const std::string& path) {
+    return krkr::documents::owns(path.c_str())
+               ? krkr::documents::open(path.c_str(), O_RDONLY)
+               : -1;
+  };
+  provider.list = [](const std::string& path, std::vector<std::string>& names) {
+    return krkr::documents::owns(path.c_str()) &&
+           krkr::documents::list(path.c_str(), names);
+  };
+  provider.read = ReadDocument;
+  return provider;
+}
+#endif
+
 // Official key ids (advkey.def): touch/tap = 1 (mouse left), BS = 8, Enter = 13.
 constexpr int kKeyTap = 1;
 constexpr int kKeyBack = 8;
@@ -136,12 +181,35 @@ bool LooksLikeArtemisGame(const std::string& raw_path, std::string* out_pack_pat
   if (raw_path.empty()) return false;
   const std::string path = StripTrailingSlash(raw_path);
   if (EndsWith(ToLower(path), ".pfs")) {
+#if defined(__ANDROID__)
+    if (krkr::documents::owns(path.c_str())) {
+      krkr::documents::Stat info{};
+      if (!krkr::documents::stat(path.c_str(), info) || info.kind != 1) return false;
+    } else
+#endif
     if (!IsRegularFile(path)) return false;
     if (out_pack_path != nullptr) *out_pack_path = path;
     return true;
   }
-  if (!IsDirectory(path)) return false;
-  const std::vector<std::string> packs = ListBasePacks(path);
+  bool directory = IsDirectory(path);
+#if defined(__ANDROID__)
+  if (!directory && krkr::documents::owns(path.c_str())) {
+    krkr::documents::Stat info{};
+    directory = krkr::documents::stat(path.c_str(), info) && info.kind == 2;
+  }
+#endif
+  if (!directory) return false;
+  std::vector<std::string> packs;
+#if defined(__ANDROID__)
+  if (krkr::documents::owns(path.c_str())) {
+    std::vector<std::string> names;
+    if (krkr::documents::list(path.c_str(), names)) {
+      for (const auto& name : names)
+        if (EndsWith(ToLower(name), ".pfs")) packs.push_back(path + "/" + name);
+    }
+  } else
+#endif
+  packs = ListBasePacks(path);
   if (packs.empty()) return false;
   if (out_pack_path != nullptr) *out_pack_path = packs.front();
   return true;
@@ -306,11 +374,22 @@ bool ArtemisRuntime::Open(const std::string& game_path, std::string* error) {
     return false;
   }
   s.pack_path = pack_path;
-  s.save_dir = DirName(pack_path);
+  // SAF-backed game paths are logical DocumentsProvider paths and cannot be
+  // used for writes.  Keep all saves, config and engine logs in the writable
+  // app-private directory exported by engine_create; ordinary filesystem
+  // hosts retain the historical sidecar location next to the pack.
+  const char* writable_dir = std::getenv("KRKR_FILES_DIR");
+  s.save_dir = (writable_dir != nullptr && writable_dir[0] != '\0')
+                   ? writable_dir
+                   : DirName(pack_path);
   s.Log("artemis: pack chain base: " + pack_path);
 
   s.engine = std::make_unique<artc::EngineContext>();
-  if (!s.engine->Open(pack_path, s.os_name, {}, s.save_dir)) {
+  artc::PackManager::FileProvider provider;
+#if defined(__ANDROID__)
+  if (krkr::documents::owns(pack_path.c_str())) provider = AndroidDocumentProvider();
+#endif
+  if (!s.engine->Open(pack_path, s.os_name, {}, s.save_dir, provider)) {
     if (error) *error = "artemis: cannot open pf8 pack chain: " + pack_path;
     Close();
     return false;

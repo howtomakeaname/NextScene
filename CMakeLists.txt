@@ -63,10 +63,8 @@ option(ENABLE_TESTS "enable tests execute build(exclude android)" ON)
 option(BUILD_TOOLS "build tools execute build(exclude android ios)" ON)
 option(BUILD_ENGINE_API "build engine_api bridge shared library" ON)
 # Artemis Engine (.pfs) support via the vendored clean-room runtime in
-# cpp/artemis. Defaults on for OpenHarmony — the only platform with a host
-# integration so far (GLES2 compositor + OHAudio); other platforms can opt in
-# once they gain a backend.
-if(OHOS)
+# cpp/artemis. Android and OpenHarmony both use the embedded GLES host.
+if(ANDROID OR OHOS)
     set(_KRKR2_ARTEMIS_DEFAULT ON)
 else()
     set(_KRKR2_ARTEMIS_DEFAULT OFF)

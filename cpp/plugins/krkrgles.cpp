@@ -40,8 +40,8 @@ struct Live2DRenderTarget {
     GLsizei height;
 };
 extern Live2DRenderTarget g_live2dRenderTarget;
-#if defined(__OHOS__)
-// krkrlive2d.cpp is excluded on OHOS (no Cubism Core binary), so the global
+#if defined(__OHOS__) || defined(__ANDROID__)
+// krkrlive2d.cpp is excluded on platforms without the Cubism Core binary, so the global
 // it publishes is defined here instead. It stays zeroed, which takes the
 // plain readback path below — same as "no live2d session active".
 Live2DRenderTarget g_live2dRenderTarget = {};

@@ -9,6 +9,9 @@
 // Universal Storage System
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
+#ifdef __ANDROID__
+#include "AndroidDocumentStorage.h"
+#endif
 
 // must before with Platform.h because marco will replece `st_atime` symbol!
 #include <fcntl.h>
@@ -179,6 +182,18 @@ tTJSBinaryStream *tTVPFileMedia::Open(const ttstr &name, tjs_uint32 flags) {
 
 void TVPListDir(const std::string &u8folder,
                 std::function<void(const std::string &, int)> cb) {
+#ifdef __ANDROID__
+    if(krkr::documents::owns(u8folder.c_str())) {
+        std::vector<std::string> names;
+        if(!krkr::documents::list(u8folder.c_str(), names)) return;
+        for(const auto &name : names) {
+            krkr::documents::Stat info{};
+            if(krkr::documents::stat((u8folder + "/" + name).c_str(), info))
+                cb(name, info.kind == 2 ? S_IFDIR : S_IFREG);
+        }
+        return;
+    }
+#endif
 
 #ifdef _WIN32
     // ---------------- Windows 分支 ----------------
@@ -245,6 +260,39 @@ void TVPListDir(const std::string &u8folder,
 void TVPGetLocalFileListAt(
     const ttstr &name,
     const std::function<void(const ttstr &, tTVPLocalFileInfo *)> &cb) {
+#ifdef __ANDROID__
+    const std::string managedFolder(name.AsStdString());
+    if(krkr::documents::owns(managedFolder.c_str())) {
+    TVPListDir(managedFolder, [&](const std::string &nativeName, int) {
+        tTVP_stat stat_buf{};
+        if(!TVP_stat((managedFolder + "/" + nativeName).c_str(), stat_buf)) return;
+            ttstr file(nativeName.c_str());
+            if(file.length() <= 2) {
+                if(file == TJS_W(".") || file == TJS_W(".."))
+                    return;
+            }
+            tjs_char *p = file.Independ();
+            while(*p) {
+                // make all characters small
+                if(*p >= TJS_W('A') && *p <= TJS_W('Z'))
+                    *p += TJS_W('a') - TJS_W('A');
+                p++;
+            }
+#if defined(__APPLE__)
+            _tjs_normalize_nfc(file);
+#endif
+            tTVPLocalFileInfo info;
+            info.NativeName = nativeName.c_str();
+            info.Mode = stat_buf.st_mode;
+            info.Size = stat_buf.st_size;
+            info.AccessTime = stat_buf.st_atime;
+            info.ModifyTime = stat_buf.st_mtime;
+            info.CreationTime = stat_buf.st_ctime;
+            cb(file, &info);
+    });
+    return;
+    }
+#endif
     DIR *dirp;
     dirent *direntp;
     tTVP_stat stat_buf;
@@ -812,11 +860,20 @@ tTVPLocalFileStream::tTVPLocalFileStream(const ttstr &origname,
     }
 #else
     tTJSNarrowStringHolder holder(localname.c_str());
+#ifdef __ANDROID__
+    const bool document = krkr::documents::owns(holder);
+    Handle = document ? krkr::documents::open(holder, rw) : open(holder, rw, 0666);
+#else
     Handle = open(holder, rw, 0666);
+#endif
     if(Handle < 0) {
         if(access == TJS_BS_APPEND || access == TJS_BS_UPDATE) {
             // use whole file writing
+#ifdef __ANDROID__
+            Handle = document ? krkr::documents::open(holder, O_RDONLY) : open(holder, O_RDONLY, 0666);
+#else
             Handle = open(holder, O_RDONLY, 0666);
+#endif
             if(Handle >= 0) {
                 tjs_uint64 size = tTVPLocalFileStream::GetSize();
                 if(size < 4 * 1024 * 1024) { // only support file size <= 4M
@@ -1468,6 +1525,16 @@ tTJSNativeClass *TVPCreateNativeClass_Storages() {
 
 static FILE *_fileopen(ttstr path) {
     std::string strpath = path.AsStdString();
+#ifdef __ANDROID__
+    if(krkr::documents::owns(strpath.c_str())) {
+        TVPCreateFolders(TVPExtractStoragePath(path));
+        int fd = krkr::documents::open(strpath.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+        if(fd < 0) return nullptr;
+        FILE *result = fdopen(fd, "wb");
+        if(!result) close(fd);
+        return result;
+    }
+#endif
     FILE *fp = fopen(strpath.c_str(), "wb");
     if(!fp) { // make dirs
         path = TVPExtractStoragePath(path);
@@ -1541,27 +1608,19 @@ void TVPAutoMountSiblingXP3Archives() {
 
     std::vector<std::string> xp3Names;
 
-    DIR *dirp = opendir(parentPath.c_str());
-    if(!dirp) {
-        spdlog::error("AutoMountXP3: opendir failed for: {}, errno={}", parentPath, errno);
-        return;
-    }
-
-    struct dirent *dp;
-    while((dp = readdir(dirp))) {
-        std::string name = dp->d_name;
-        if(name.size() < 5) continue;
+    TVPListDir(parentPath, [&](const std::string &name, int mode) {
+        if(!S_ISREG(mode)) return;
+        if(name.size() < 5) return;
         std::string ext = name.substr(name.size() - 4);
         for(auto &c : ext) c = (char)tolower((unsigned char)c);
-        if(ext != ".xp3") continue;
+        if(ext != ".xp3") return;
 
         std::string baseLower = name.substr(0, name.size() - 4);
         for(auto &c : baseLower) c = (char)tolower((unsigned char)c);
-        if(baseLower == projBaseStr) continue;
+        if(baseLower == projBaseStr) return;
 
         xp3Names.push_back(name);
-    }
-    closedir(dirp);
+    });
 
     std::sort(xp3Names.begin(), xp3Names.end());
 

@@ -1,3 +1,4 @@
+#include "AndroidDocumentStorage.h"
 #include "AndroidUtils.h"
 #include <unzip.h>
 #include "zlib.h"
@@ -897,6 +898,8 @@ static bool _posix_mkdirs(const std::string &path) {
 }
 
 bool TVPCreateFolders(const ttstr &folder) {
+    const auto path = folder.AsStdString();
+    if(krkr::documents::owns(path.c_str())) return krkr::documents::mutate("nativeMkdir", path.c_str());
     JniMethodInfo methodInfo;
     if(JniHelper::getStaticMethodInfo(
            methodInfo, "org/tvp/kirikiri2/KR2Activity", "CreateFolders",
@@ -939,6 +942,21 @@ static bool TVPWriteDataToFileJava(const std::string &filename,
 bool TVPWriteDataToFile(const ttstr &filepath, const void *data,
                         unsigned int size) {
     std::string filename = filepath.AsStdString();
+    if(krkr::documents::owns(filename.c_str())) {
+        int fd = krkr::documents::open(filename.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+        if(fd < 0) return false;
+        const auto *bytes = static_cast<const unsigned char *>(data);
+        size_t completed = 0;
+        while(completed < size) {
+            const auto count = write(fd, bytes + completed, size - completed);
+            if(count < 0 && errno == EINTR) continue;
+            if(count <= 0) { close(fd); return false; }
+            completed += count;
+        }
+        const bool flushed = fsync(fd) == 0;
+        const bool closed = close(fd) == 0;
+        return flushed && closed;
+    }
     while(access(filename.c_str(), F_OK) == 0) {
         // for number filename suffix issue
         time_t t = time(nullptr);
@@ -1041,6 +1059,7 @@ void TVPShowIME(int x, int y, int w, int h) {
 void TVPProcessInputEvents() {}
 
 bool TVPDeleteFile(const std::string &filename) {
+    if(krkr::documents::owns(filename.c_str())) return krkr::documents::mutate("nativeDelete", filename.c_str());
     JniMethodInfo methodInfo;
     if(JniHelper::getStaticMethodInfo(methodInfo,
                                       "org/tvp/kirikiri2/KR2Activity",
@@ -1057,6 +1076,7 @@ bool TVPDeleteFile(const std::string &filename) {
 }
 
 bool TVPRenameFile(const std::string &from, const std::string &to) {
+    if(krkr::documents::owns(from.c_str())) return krkr::documents::mutate("nativeRename", from.c_str(), to.c_str());
     JniMethodInfo methodInfo;
     if(JniHelper::getStaticMethodInfo(
            methodInfo, "org/tvp/kirikiri2/KR2Activity", "RenameFile",
@@ -1093,7 +1113,15 @@ bool TVP_stat(const tjs_char *name, tTVP_stat &s) {
 // int stat64(const char* __path, struct stat64* __buf)
 // __INTRODUCED_IN(21); // force link it !
 bool TVP_stat(const char *name, tTVP_stat &s) {
-    struct stat t;
+    if(krkr::documents::owns(name)) {
+        krkr::documents::Stat value{};
+        if(!krkr::documents::stat(name, value)) return false;
+        s.st_mode = value.kind == 2 ? S_IFDIR | 0700 : S_IFREG | 0600;
+        s.st_size = value.size;
+        s.st_atime = s.st_mtime = s.st_ctime = value.modified;
+        return true;
+    }
+    struct stat t{};
     // static_assert(sizeof(t.st_size) == 4, "");
     static_assert(sizeof(t.st_size) == 8, "");
     bool ret = !stat(name, &t);

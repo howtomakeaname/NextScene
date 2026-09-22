@@ -3,6 +3,15 @@ project(krkr2plugin)
 
 add_library(${PROJECT_NAME} STATIC)
 
+# Live2D is optional. Some platform checkouts carry only the public Cubism
+# header (or no SDK at all), so keep the engine linkable with a no-op anchor
+# until the complete Framework/Core package is supplied.
+if(NOT OHOS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cubism/Framework")
+    set(KRKR2_LIVE2D_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/krkrlive2d.cpp)
+else()
+    set(KRKR2_LIVE2D_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/krkrlive2d_stub.cpp)
+endif()
+
 target_sources(${PROJECT_NAME} PUBLIC
     scriptsEx.cpp
     win32dialog.cpp
@@ -28,11 +37,7 @@ target_sources(${PROJECT_NAME} PUBLIC
     layerExRaster.cpp
     layerExAreaAverage.cpp
     layerExLongExposure.cpp
-    # krkrlive2d.cpp needs the Cubism Core prebuilt binary, which is not
-    # available for OHOS; excluded there (engine_api skips its anchor too).
-    # Must be absolute: PUBLIC sources propagate to consumers in other
-    # directories, and genex entries are resolved relative to the consumer.
-    $<$<NOT:$<PLATFORM_ID:OHOS>>:${CMAKE_CURRENT_SOURCE_DIR}/krkrlive2d.cpp>
+    ${KRKR2_LIVE2D_SOURCE}
     # Software subset of layerExDraw (GdiPlus.Appearance + Layer.drawXxx)
     # for the OHOS build, where libgdiplus is not available.
     $<$<PLATFORM_ID:OHOS>:${CMAKE_CURRENT_SOURCE_DIR}/layerExDrawLite.cpp>
@@ -69,7 +74,7 @@ add_definitions(-D__STDC_CONSTANT_MACROS -DTJS_TEXT_OUT_CRLF)
 # ---------------------------------------------------------------------------
 # Live2D Cubism SDK (no OHOS prebuilt Core binary — skipped entirely there)
 # ---------------------------------------------------------------------------
-if(NOT OHOS)
+if(NOT OHOS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cubism/Framework")
 set(CUBISM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/cubism)
 set(CUBISM_CORE_DIR ${CUBISM_DIR}/Core)
 set(CUBISM_FW_DIR ${CUBISM_DIR}/Framework)
@@ -142,9 +147,10 @@ target_link_libraries(${PROJECT_NAME} PUBLIC krkr2core)
 
 add_subdirectory(psdfile)
 add_subdirectory(psbfile)
-if(NOT OHOS)
+if(NOT OHOS AND NOT ANDROID)
     # layerex_draw depends on libgdiplus outside Windows, which is not
-    # provisioned for OHOS yet.
+    # provisioned for Android or OHOS. The core GLES renderer remains
+    # available on both mobile targets.
     add_subdirectory(layerex_draw)
 endif()
 add_subdirectory(motionplayer)
@@ -162,7 +168,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
         fstat
 #        json steam DrawDeviceForSteam
 )
-if(NOT OHOS)
+if(NOT OHOS AND NOT ANDROID)
     target_link_libraries(${PROJECT_NAME} PUBLIC layerExDraw)
 endif()
 

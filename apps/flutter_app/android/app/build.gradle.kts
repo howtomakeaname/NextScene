@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -7,8 +9,20 @@ plugins {
 
 android {
     namespace = "org.github.krkr2.flutter_app"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    // Keep Android builds reproducible with the SDK image used by CI and the
+    // local emulator. The OHOS Flutter fork may expose an older Android
+    // default even though the installed SDK is android-36.
+    compileSdk = 36
+    val externalNdk = providers.environmentVariable("ANDROID_NDK_HOME").orNull
+    if (externalNdk != null) {
+        ndkPath = externalNdk
+        val ndkProperties = Properties().apply {
+            file("$externalNdk/source.properties").inputStream().use { load(it) }
+        }
+        ndkVersion = ndkProperties.getProperty("Pkg.Revision")
+    } else {
+        ndkVersion = flutter.ndkVersion
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -25,7 +39,7 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
 
@@ -37,16 +51,19 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
+                targets += listOf("engine_api", "file_archive")
                 // Only build for arm64-v8a to avoid unnecessary compilation
                 abiFilters += listOf("arm64-v8a")
                 // Project root is ../../../../ relative to this build.gradle.kts
                 val projectRoot = file("../../../../").absolutePath
-                val vcpkgRoot = "${projectRoot}/.devtools/vcpkg"
+                val vcpkgRoot = providers.environmentVariable("VCPKG_ROOT").orNull
+                    ?: "${projectRoot}/.devtools/vcpkg"
                 val ndkDir = android.ndkDirectory.absolutePath
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
                     "-DVCPKG_TARGET_ANDROID=ON",
                     "-DBUILD_ENGINE_API=ON",
+                    "-DBUILD_FILE_ARCHIVE=ON",
                     "-DENABLE_TESTS=OFF",
                     "-DBUILD_TOOLS=OFF",
                     "-DVCPKG_ROOT=${vcpkgRoot}",
@@ -54,6 +71,9 @@ android {
                     "-DCMAKE_TOOLCHAIN_FILE=${vcpkgRoot}/scripts/buildsystems/vcpkg.cmake",
                     "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${ndkDir}/build/cmake/android.toolchain.cmake"
                 )
+                providers.environmentVariable("VCPKG_INSTALLED_DIR").orNull?.let {
+                    arguments += "-DVCPKG_INSTALLED_DIR=$it"
+                }
             }
         }
     }
@@ -62,7 +82,7 @@ android {
         cmake {
             // Point to the project root CMakeLists.txt which builds both krkr2.so and engine_api.so
             path = file("../../../../CMakeLists.txt")
-            version = "3.28.0+"
+            version = "3.31.6"
         }
     }
 
