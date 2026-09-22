@@ -106,6 +106,12 @@ abstract class AppLocalizations {
   /// **'Authorize Folder'**
   String get managerAuthorize;
 
+  /// No description provided for @managerAndroidAuthorizationHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Allow file access in system settings. This page manages only files in Download/{appId}/.'**
+  String managerAndroidAuthorizationHint(String appId);
+
   /// No description provided for @managerAuthorizationHint.
   ///
   /// In en, this message translates to:

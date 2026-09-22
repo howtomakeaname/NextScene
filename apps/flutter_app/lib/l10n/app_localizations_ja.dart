@@ -12,6 +12,11 @@ class AppLocalizationsJa extends AppLocalizations {
   String get managerAuthorize => 'フォルダへのアクセスを許可';
 
   @override
+  String managerAndroidAuthorizationHint(String appId) {
+    return 'システム設定でファイルへのアクセスを許可してください。このページでは Download/$appId/ 内のファイルだけを管理します。';
+  }
+
+  @override
   String get managerAuthorizationHint =>
       'ダウンロード内の本アプリ専用フォルダを選択してください。他のフォルダは管理できません。';
 

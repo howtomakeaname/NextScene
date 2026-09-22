@@ -12,6 +12,11 @@ class AppLocalizationsZh extends AppLocalizations {
   String get managerAuthorize => '授权文件夹';
 
   @override
+  String managerAndroidAuthorizationHint(String appId) {
+    return '请在系统设置中允许文件访问。授权后，本页只管理 Download/$appId/ 下的文件。';
+  }
+
+  @override
   String get managerAuthorizationHint => '请选择下载目录下的应用专属文件夹，其他目录不在管理范围内。';
 
   @override

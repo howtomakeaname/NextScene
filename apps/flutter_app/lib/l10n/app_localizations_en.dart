@@ -12,6 +12,11 @@ class AppLocalizationsEn extends AppLocalizations {
   String get managerAuthorize => 'Authorize Folder';
 
   @override
+  String managerAndroidAuthorizationHint(String appId) {
+    return 'Allow file access in system settings. This page manages only files in Download/$appId/.';
+  }
+
+  @override
   String get managerAuthorizationHint =>
       'Select this app’s folder inside Downloads. Other folders cannot be managed.';
 
