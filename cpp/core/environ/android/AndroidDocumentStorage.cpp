@@ -84,7 +84,9 @@ bool mutate(const char *method, const char *path, const char *to) {
     if (!c.ready) return false;
     auto text = string(c.env, path);
     auto target = to ? string(c.env, to) : nullptr;
-    bool value = c.env->CallStaticBooleanMethod(c.classID, c.methodID, text, target);
+    const bool value = to
+        ? c.env->CallStaticBooleanMethod(c.classID, c.methodID, text, target)
+        : c.env->CallStaticBooleanMethod(c.classID, c.methodID, text);
     c.env->DeleteLocalRef(text);
     if (target) c.env->DeleteLocalRef(target);
     return !c.failed() && value;
