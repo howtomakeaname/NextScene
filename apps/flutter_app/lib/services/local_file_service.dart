@@ -5,6 +5,8 @@ import 'dart:math';
 import 'package:path/path.dart' as p;
 
 import 'file_operation_error.dart';
+import 'manager_file_system.dart';
+export 'manager_file_system.dart';
 export 'file_operation_error.dart';
 
 class FileTask {
@@ -90,14 +92,6 @@ String formatTransferSpeed(double bytesPerSecond) {
   return '${value.toStringAsFixed(digits)} $unit';
 }
 
-class LocalFileEntry {
-  const LocalFileEntry(this.path, this.stat);
-  final String path;
-  final FileStat stat;
-  String get name => p.basename(path);
-  bool get isDirectory => stat.type == FileSystemEntityType.directory;
-}
-
 class DeletedFile {
   const DeletedFile({
     required this.id,
@@ -121,8 +115,14 @@ class DirectorySummary {
 /// symbolic link or overwrite an existing item. Private work is excluded from
 /// directory listings and game discovery, including while a copy is incomplete.
 class LocalFileService {
-  LocalFileService({required String rootPath, this.onPathChanged})
-    : rootPath = p.normalize(p.absolute(rootPath));
+  LocalFileService({
+    required String rootPath,
+    this.onPathChanged,
+    ManagerFileSystem? fileSystem,
+  }) : rootPath = p.normalize(p.absolute(rootPath)),
+       io = fileSystem ?? LocalManagerFileSystem();
+
+  final ManagerFileSystem io;
 
   static const privateName = '.krkr-manager';
   final String rootPath;
@@ -183,29 +183,19 @@ class LocalFileService {
         (path == rootPath || path.toLowerCase() == gamesPath.toLowerCase())) {
       throw const FileOperationException(FileErrorCode.protectedDirectory);
     }
-    // Check each component, not just the last one: a link in an ancestor can
-    // otherwise redirect a perfectly ordinary-looking child outside the root.
-    String cursor = p.rootPrefix(path);
-    for (final part in p.split(path).skip(1)) {
-      cursor = p.join(cursor, part);
-      if (await FileSystemEntity.type(cursor, followLinks: false) ==
-          FileSystemEntityType.link) {
-        throw const FileOperationException(FileErrorCode.unsupportedLink);
-      }
-    }
+    await io.validateAncestors(rootPath, path);
     return path;
   }
 
   Future<List<LocalFileEntry>> list(String directory) async {
     final path = await validatePath(directory);
     final result = <LocalFileEntry>[];
-    await for (final entry in Directory(path).list(followLinks: false)) {
+    for (final entry in await io.list(path)) {
       if (p.basename(entry.path).toLowerCase() == privateName) continue;
-      if (await FileSystemEntity.type(entry.path, followLinks: false) ==
-          FileSystemEntityType.link) {
+      if (await io.type(entry.path) == FileSystemEntityType.link) {
         continue;
       }
-      result.add(LocalFileEntry(entry.path, await entry.stat()));
+      result.add(LocalFileEntry(entry.path, entry.stat));
     }
     result.sort((a, b) {
       if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
@@ -221,20 +211,17 @@ class LocalFileService {
     var bytes = 0;
     var items = 0;
     Future<void> walk(String current) async {
-      await for (final entry in Directory(current).list(followLinks: false)) {
+      for (final entry in await io.list(current)) {
         task.check();
         final name = p.basename(entry.path).toLowerCase();
         if (name == privateName) continue;
-        final type = await FileSystemEntity.type(
-          entry.path,
-          followLinks: false,
-        );
+        final type = await io.type(entry.path);
         if (type == FileSystemEntityType.link) continue;
         items++;
         if (type == FileSystemEntityType.directory) {
           await walk(entry.path);
         } else {
-          bytes += (await entry.stat()).size;
+          bytes += (entry.stat).size;
         }
       }
     }
@@ -248,13 +235,13 @@ class LocalFileService {
     bool internal = false,
   }) async {
     await validatePath(destination, internal: internal);
-    final parent = Directory(p.dirname(destination));
-    if (!await parent.exists()) {
+    final parent = p.dirname(destination);
+    if (!await io.exists(parent)) {
       throw const FileOperationException(FileErrorCode.notFound);
     }
     // Download is case-insensitive. Keep the same collision policy in tests
     // and on other hosts, including for an empty destination directory.
-    await for (final entry in parent.list(followLinks: false)) {
+    for (final entry in await io.list(parent)) {
       if (p.basename(entry.path).toLowerCase() ==
           p.basename(destination).toLowerCase()) {
         throw const FileOperationException(FileErrorCode.conflict);
@@ -268,7 +255,7 @@ class LocalFileService {
         await validatePath(parent);
         final destination = p.join(parent, name);
         await _requireVacant(destination);
-        await Directory(destination).create();
+        await io.mkdir(destination);
       });
 
   Future<void> rename(String source, String name) {
@@ -301,12 +288,7 @@ class LocalFileService {
   Future<void> _renameEntity(String from, String to) async {
     await validatePath(from, internal: true);
     await validatePath(to, internal: true);
-    if (await FileSystemEntity.type(from, followLinks: false) ==
-        FileSystemEntityType.directory) {
-      await Directory(from).rename(to);
-    } else {
-      await File(from).rename(to);
-    }
+    await io.rename(from, to);
   }
 
   String _newId() {
@@ -317,10 +299,11 @@ class LocalFileService {
     ).join();
   }
 
-  Future<Directory> _workspace(String kind) async {
+  Future<String> _workspace(String kind) async {
     final path = p.join(_privatePath, kind, _newId());
     await validatePath(path, internal: true);
-    return Directory(path).create(recursive: true);
+    await io.mkdir(path, recursive: true);
+    return path;
   }
 
   Future<void> copy(String source, String destination, FileTask task) =>
@@ -334,24 +317,23 @@ class LocalFileService {
         final work = await _workspace('tasks');
         try {
           task.total = await _measure(from, task);
-          await _copyEntity(from, p.join(work.path, 'item'), task);
+          await _copyEntity(from, p.join(work, 'item'), task);
           task.check();
           await _requireVacant(to);
-          await _renameEntity(p.join(work.path, 'item'), to);
+          await _renameEntity(p.join(work, 'item'), to);
         } finally {
-          await _deletePrivateWorkspace(work.path);
+          await _deletePrivateWorkspace(work);
         }
       });
 
   Future<int> _measure(String path, FileTask task) async {
     task.check();
     await validatePath(path);
-    if (await FileSystemEntity.type(path, followLinks: false) !=
-        FileSystemEntityType.directory) {
-      return (await File(path).stat()).size;
+    if (await io.type(path) != FileSystemEntityType.directory) {
+      return (await io.stat(path)).size;
     }
     var bytes = 0;
-    await for (final entry in Directory(path).list(followLinks: false)) {
+    for (final entry in await io.list(path)) {
       bytes += await _measure(entry.path, task);
     }
     return bytes;
@@ -361,18 +343,17 @@ class LocalFileService {
     task.check();
     await validatePath(from);
     await validatePath(to, internal: true);
-    if (await FileSystemEntity.type(from, followLinks: false) ==
-        FileSystemEntityType.directory) {
-      await Directory(to).create();
-      await for (final entry in Directory(from).list(followLinks: false)) {
+    if (await io.type(from) == FileSystemEntityType.directory) {
+      await io.mkdir(to);
+      for (final entry in await io.list(from)) {
         await _copyEntity(entry.path, p.join(to, p.basename(entry.path)), task);
       }
       return;
     }
     task.currentName = p.basename(from);
-    final output = await File(to).open(mode: FileMode.writeOnly);
+    final output = await io.writer(to);
     try {
-      await for (final bytes in File(from).openRead()) {
+      await for (final bytes in io.read(from)) {
         task.check();
         await output.writeFrom(bytes);
         task.completed += bytes.length;
@@ -388,25 +369,25 @@ class LocalFileService {
     final from = await validatePath(source, mutate: true);
     final work = await _workspace('trash');
     final item = DeletedFile(
-      id: p.basename(work.path),
+      id: p.basename(work),
       originalPath: from,
       deletedAt: DateTime.now(),
     );
-    final manifest = File(p.join(work.path, 'entry.json'));
-    await manifest.writeAsString(
+    final manifest = p.join(work, 'entry.json');
+    await io.writeText(
+      manifest,
       jsonEncode({
         'path': p.relative(from, from: rootPath),
         'deletedAt': item.deletedAt.toIso8601String(),
       }),
-      flush: true,
     );
     try {
       // Trash is not a library relocate. GameManager keeps the original
       // path and marks the entry unavailable so history is not rewritten
       // into `.krkr-manager/trash`.
-      await _relocate(from, p.join(work.path, 'item'), notify: false);
+      await _relocate(from, p.join(work, 'item'), notify: false);
     } catch (_) {
-      await _deletePrivateWorkspace(work.path);
+      await _deletePrivateWorkspace(work);
       rethrow;
     }
     return item;
@@ -422,25 +403,24 @@ class LocalFileService {
   Future<List<DeletedFile>> deletedFiles() async {
     final trashPath = p.join(_privatePath, 'trash');
     await validatePath(trashPath, internal: true);
-    if (!await Directory(trashPath).exists()) return [];
+    if (!await io.exists(trashPath)) return [];
     final items = <DeletedFile>[];
-    await for (final work in Directory(trashPath).list(followLinks: false)) {
-      if (work is! Directory ||
-          !RegExp(r'^[0-9a-f]{32}$').hasMatch(p.basename(work.path))) {
+    for (final entry in await io.list(trashPath)) {
+      final work = entry.path;
+      if (!entry.isDirectory ||
+          !RegExp(r'^[0-9a-f]{32}$').hasMatch(p.basename(work))) {
         continue;
       }
-      await validatePath(work.path, internal: true);
-      final manifest = p.join(work.path, 'entry.json');
+      await validatePath(work, internal: true);
+      final manifest = p.join(work, 'entry.json');
       await validatePath(manifest, internal: true);
-      final payload = p.join(work.path, 'item');
+      final payload = p.join(work, 'item');
       await validatePath(payload, internal: true);
-      if (await FileSystemEntity.type(payload, followLinks: false) ==
-          FileSystemEntityType.notFound) {
+      if (await io.type(payload) == FileSystemEntityType.notFound) {
         continue;
       }
       final data =
-          jsonDecode(await File(manifest).readAsString())
-              as Map<String, dynamic>;
+          jsonDecode(await io.readText(manifest)) as Map<String, dynamic>;
       final relative = data['path'] as String;
       if (p.isAbsolute(relative)) {
         throw const FileOperationException(FileErrorCode.trashCorrupt);
@@ -451,7 +431,7 @@ class LocalFileService {
       );
       items.add(
         DeletedFile(
-          id: p.basename(work.path),
+          id: p.basename(work),
           originalPath: original,
           deletedAt: DateTime.parse(data['deletedAt'] as String),
         ),
@@ -488,8 +468,8 @@ class LocalFileService {
     }
     // Directory.delete does not follow child links. The workspace itself has
     // already been checked and is always a single generated task directory.
-    if (await Directory(normalized).exists()) {
-      await Directory(normalized).delete(recursive: true);
+    if (await io.exists(normalized)) {
+      await io.delete(normalized, recursive: true);
     }
   }
 
@@ -501,13 +481,14 @@ class LocalFileService {
   ) => _exclusive(() async {
     await _requireVacant(destination);
     final work = await _workspace('tasks');
-    final output = await Directory(p.join(work.path, 'item')).create();
+    final output = p.join(work, 'item');
+    await io.mkdir(output);
     try {
-      await unpack(output.path);
+      await unpack(output);
       await _requireVacant(destination);
-      await _renameEntity(output.path, destination);
+      await _renameEntity(output, destination);
     } finally {
-      await _deletePrivateWorkspace(work.path);
+      await _deletePrivateWorkspace(work);
     }
   });
 }
