@@ -1,6 +1,7 @@
 {
   "@@locale": "zh",
   "managerAuthorize": "授权文件夹",
+  "managerAndroidAuthorizationHint": "请在系统设置中允许文件访问。授权后，本页只管理 Download/{appId}/ 下的文件。",
   "managerAuthorizationHint": "请选择下载目录下的应用专属文件夹，其他目录不在管理范围内。",
   "managerEmpty": "此文件夹为空",
   "managerNewFolder": "新建文件夹",

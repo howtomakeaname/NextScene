@@ -1,6 +1,8 @@
 {
   "@@locale": "en",
   "managerAuthorize": "Authorize Folder",
+  "managerAndroidAuthorizationHint": "Allow file access in system settings. This page manages only files in Download/{appId}/.",
+  "@managerAndroidAuthorizationHint": { "placeholders": { "appId": { "type": "String" } } },
   "managerAuthorizationHint": "Select this app’s folder inside Downloads. Other folders cannot be managed.",
   "managerEmpty": "This folder is empty",
   "managerNewFolder": "New Folder",

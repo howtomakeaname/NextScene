@@ -1,6 +1,7 @@
 {
   "@@locale": "ja",
   "managerAuthorize": "フォルダへのアクセスを許可",
+  "managerAndroidAuthorizationHint": "システム設定でファイルへのアクセスを許可してください。このページでは Download/{appId}/ 内のファイルだけを管理します。",
   "managerAuthorizationHint": "ダウンロード内の本アプリ専用フォルダを選択してください。他のフォルダは管理できません。",
   "managerEmpty": "このフォルダは空です",
   "managerNewFolder": "新規フォルダ",
