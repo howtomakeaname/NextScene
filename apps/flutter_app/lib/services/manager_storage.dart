@@ -15,7 +15,7 @@ import 'manager_scope.dart';
 /// - HarmonyOS: `ensureManagerRoot` (DOWNLOAD picker) through the bridge.
 /// - macOS / Linux / Windows: one directory pick validated by [ManagerScope];
 ///   `dart:io` can use the returned path directly.
-/// - Android: native Downloads paths after storage permission is granted.
+/// - Android: logical Downloads paths backed by a persisted SAF tree grant.
 /// - iOS: file-provider locations still require a separate adapter.
 class ManagerStorage {
   ManagerStorage({
@@ -27,7 +27,7 @@ class ManagerStorage {
        _platform = platform ?? Platform.operatingSystem;
 
   static const _prefsKey = 'krkr2_manager_grant';
-  static const _pathBackedPlatforms = {
+  static const _supportedPlatforms = {
     'ohos',
     'android',
     'macos',
@@ -39,12 +39,12 @@ class ManagerStorage {
   final Future<String?> Function()? _pickDirectory;
   final String _platform;
 
-  bool get usesAndroidStoragePermission => _platform == 'android';
+  bool get usesAndroidDocumentTree => _platform == 'android';
 
   String get appId => ManagerScope.expectedAppId(_platform);
 
   /// True when file management can run on this platform at all.
-  bool get isSupported => _pathBackedPlatforms.contains(_platform);
+  bool get isSupported => _supportedPlatforms.contains(_platform);
 
   Future<ManagerGrant?> currentGrant() async {
     if (!isSupported) {
@@ -55,7 +55,8 @@ class ManagerStorage {
         return await _ensureNativeRoot(promptIfMissing: false);
       } on FileOperationException catch (error) {
         if (error.code == FileErrorCode.permissionDenied ||
-            error.code == FileErrorCode.cancelled) {
+            error.code == FileErrorCode.cancelled ||
+            error.code == FileErrorCode.notFound) {
           return null;
         }
         rethrow;

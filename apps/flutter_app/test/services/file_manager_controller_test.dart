@@ -64,6 +64,7 @@ void main() {
     final android = FileManagerController(
       gameManager: games,
       storage: ManagerStorage(platform: 'android', channel: channel),
+      fileSystem: LocalManagerFileSystem(),
     );
     try {
       await android.authorize();

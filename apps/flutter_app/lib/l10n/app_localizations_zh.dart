@@ -13,7 +13,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String managerAndroidAuthorizationHint(String appId) {
-    return '请在系统设置中允许文件访问。授权后，本页只管理 Download/$appId/ 下的文件。';
+    return '在系统文件选择器中打开 Download/$appId/，点击“使用此文件夹”。游戏请放在其中的 games 文件夹内。';
   }
 
   @override
@@ -885,7 +885,8 @@ class AppLocalizationsZh extends AppLocalizations {
   }
 
   @override
-  String get androidAllFilesAccess => 'Android 上需要“所有文件”访问权限。请授予权限后重新打开游戏。';
+  String get androidDirectoryAccess =>
+      '游戏目录尚未授权。请重新选择 Download/com.nextscene.app 文件夹后打开游戏。';
 
   @override
   String get noXp3InFolder => '所选文件夹里没有找到 XP3 归档或 Artemis 封包（.pfs）。';

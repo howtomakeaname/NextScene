@@ -18,6 +18,10 @@ import '../engine/virtual_input_controller.dart';
 import '../constants/prefs_keys.dart';
 import '../l10n/app_localizations.dart';
 import '../models/game_engine.dart';
+import '../services/android_document_file_system.dart';
+import '../services/manager_file_system.dart';
+import '../services/manager_storage.dart';
+import '../services/game_directory_scanner.dart';
 import '../services/engine_runtime_guard.dart';
 import '../services/game_manager.dart';
 import '../widgets/engine_surface.dart';
@@ -30,6 +34,7 @@ class GamePage extends StatefulWidget {
   const GamePage({
     super.key,
     required this.gamePath,
+    this.engine,
     this.title,
     this.coverPath,
     this.saveDirectoryName,
@@ -40,6 +45,7 @@ class GamePage extends StatefulWidget {
   });
 
   final String gamePath;
+  final GameEngine? engine;
   final String? title;
   final String? coverPath;
   final String? saveDirectoryName;
@@ -160,9 +166,10 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
 
   // Which native runtime this entry runs on (drives preflight + the
   // `engine` option handed to the bridge).
-  late final GameEngine _engine = GameEngine.detect(
-    _normalizeGamePath(widget.gamePath),
-  );
+  late final GameEngine _engine =
+      widget.engine ?? GameEngine.detect(_normalizeGamePath(widget.gamePath));
+
+  ManagerFileSystem _gameFiles = LocalManagerFileSystem();
 
   // State
   _EnginePhase _phase = _EnginePhase.initializing;
@@ -394,7 +401,7 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
     // If the current directory already has startup.tjs, it IS the game
     // root (or at least a valid project dir). Do NOT adjust.
     for (final name in ['startup.tjs', 'Startup.tjs', 'STARTUP.TJS']) {
-      if (await File('$clean/$name').exists()) {
+      if (await _gameFiles.exists('$clean/$name')) {
         _log('Game path has $name — no adjustment needed');
         return path;
       }
@@ -403,7 +410,7 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
     // If <path>/data/system/Initialize.tjs exists, this is already a
     // proper game root that uses the data/ sub-directory layout.
     for (final name in ['initialize.tjs', 'Initialize.tjs']) {
-      if (await File('$clean/data/system/$name').exists()) {
+      if (await _gameFiles.exists('$clean/data/system/$name')) {
         _log('Game path has data/system/$name — no adjustment needed');
         return path;
       }
@@ -422,7 +429,7 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
     // Verify system/Initialize.tjs exists in the selected directory.
     bool hasSystemInit = false;
     for (final name in ['initialize.tjs', 'Initialize.tjs']) {
-      if (await File('$clean/system/$name').exists()) {
+      if (await _gameFiles.exists('$clean/system/$name')) {
         hasSystemInit = true;
         break;
       }
@@ -445,45 +452,40 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
     final l10n = AppLocalizations.of(context);
     try {
       if (_isArchivePath(path) || GameEngine.isPfsPack(path)) {
-        final file = File(path);
-        if (!await file.exists()) {
+        if (!await _gameFiles.exists(path)) {
           return l10n?.archiveNotExist(path);
         }
         return null;
       }
 
-      final dir = Directory(path);
-      if (!await dir.exists()) {
+      if (await _gameFiles.type(path) != FileSystemEntityType.directory) {
         return l10n?.gamePathNotExist(path);
       }
 
       if (_engine == GameEngine.artemis) {
         // Artemis: the directory must hold a base pack; the runtime chains
         // patch volumes and reads system.ini out of the pack itself.
-        if (!GameEngine.directoryHasPfs(path)) {
+        if (!(await _gameFiles.list(path)).any(
+          (entry) => !entry.isDirectory && GameEngine.isPfsPack(entry.path),
+        )) {
           return l10n?.missingArtemisPack(path);
         }
         return null;
       }
 
       // Folder with only data.xp3: startup.tjs is inside the archive.
-      final launchPath = GameEngine.resolveKrkrLaunchPath(path);
+      final launchPath = await GameDirectoryScanner(
+        _gameFiles,
+      ).launchPath(path);
       if (_isArchivePath(launchPath)) {
-        if (!await File(launchPath).exists()) {
+        if (!await _gameFiles.exists(launchPath)) {
           return l10n?.archiveNotExist(launchPath);
         }
         return null;
       }
 
       // Loose startup.tjs, or unpacked data/system/initialize.tjs.
-      final startup = File('$launchPath/startup.tjs');
-      final startupUpper = File('$launchPath/Startup.tjs');
-      final init = File('$launchPath/data/system/initialize.tjs');
-      final initUpper = File('$launchPath/data/system/Initialize.tjs');
-      if (!await startup.exists() &&
-          !await startupUpper.exists() &&
-          !await init.exists() &&
-          !await initUpper.exists()) {
+      if (!await GameDirectoryScanner(_gameFiles).hasStartup(launchPath)) {
         return l10n?.missingStartupScript(path);
       }
     } catch (e) {
@@ -493,8 +495,10 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
   }
 
   Future<void> _autoStart() async {
+    if (Platform.isAndroid && !await _ensureAndroidDirectoryAccess()) return;
+    if (!mounted) return;
     if (_engineConflict) {
-      if (Platform.operatingSystem == 'ohos') {
+      if (Platform.isAndroid || Platform.operatingSystem == 'ohos') {
         await _replaceParkedRuntime();
         return;
       }
@@ -531,18 +535,6 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
       _startPlaySessionRun();
       _startTickLoop();
       return;
-    }
-    if (Platform.isAndroid) {
-      final granted = await _ensureAndroidAllFilesAccess();
-      if (!mounted) return;
-      if (!granted) {
-        _fail(
-          AppLocalizations.of(context)?.androidAllFilesAccess ??
-              'All files access is required on Android. '
-                  'Please grant permission and open the game again.',
-        );
-        return;
-      }
     }
 
     setState(() => _phase = _EnginePhase.creating);
@@ -629,7 +621,9 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
     // itself and step up to the real game root.
     normalizedGamePath = await _adjustGamePathForAndroid(normalizedGamePath);
     if (_engine == GameEngine.krkr2) {
-      final resolved = GameEngine.resolveKrkrLaunchPath(normalizedGamePath);
+      final resolved = await GameDirectoryScanner(
+        _gameFiles,
+      ).launchPath(normalizedGamePath);
       if (resolved != normalizedGamePath) {
         _log('Resolved KrKr launch path: $normalizedGamePath → $resolved');
         normalizedGamePath = resolved;
@@ -702,24 +696,23 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<bool> _ensureAndroidAllFilesAccess() async {
+  Future<bool> _ensureAndroidDirectoryAccess({bool prompt = true}) async {
     try {
-      final has =
-          await _platformChannel.invokeMethod<bool>(
-            'hasManageExternalStorage',
-          ) ??
-          false;
-      if (has) return true;
-      _log('Requesting Android all-files access permission...');
-      await _platformChannel.invokeMethod<bool>('requestManageExternalStorage');
-      final hasAfter =
-          await _platformChannel.invokeMethod<bool>(
-            'hasManageExternalStorage',
-          ) ??
-          false;
-      return hasAfter;
-    } catch (e) {
-      _log('All-files access check failed: $e');
+      final storage = ManagerStorage();
+      final grant =
+          await storage.currentGrant() ??
+          (prompt ? await storage.authorize() : null);
+      if (grant == null) throw StateError('Directory access was revoked');
+      final io = AndroidDocumentFileSystem(grant.rootPath);
+      await io.validateAncestors(
+        grant.rootPath,
+        _normalizeGamePath(widget.gamePath),
+      );
+      _gameFiles = io;
+      return mounted;
+    } catch (error) {
+      _log('Directory access unavailable: $error');
+      if (mounted) _fail(AppLocalizations.of(context)!.androidDirectoryAccess);
       return false;
     }
   }
@@ -1139,6 +1132,11 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
     _pendingLifecycleResumed = false;
 
     try {
+      if (Platform.isAndroid &&
+          !await _ensureAndroidDirectoryAccess(prompt: false)) {
+        await _exitGame(runtimeTerminated: true);
+        return;
+      }
       final int result = await _bridge.engineResume();
       if (result == _engineResultOk && mounted) {
         final bool resumeTick = _resumeTickAfterLifecycle;

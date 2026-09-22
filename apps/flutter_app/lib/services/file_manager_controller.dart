@@ -1,9 +1,9 @@
-import 'dart:io';
-
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import 'archive_extractor.dart';
+import 'document_archive_extractor.dart';
+import 'android_document_file_system.dart';
 import 'archive_volumes.dart';
 import 'engine_runtime_guard.dart';
 import 'game_manager.dart';
@@ -23,10 +23,12 @@ class FileManagerController extends ChangeNotifier {
     ManagerStorage? storage,
     ArchiveExtractor? extractor,
     EngineRuntimeGuard? runtimeGuard,
+    this.fileSystem,
   }) : storage = storage ?? ManagerStorage(),
        extractor = extractor ?? ArchiveExtractor(),
        runtimeGuard = runtimeGuard ?? EngineRuntimeGuard.instance;
 
+  final ManagerFileSystem? fileSystem;
   final GameManager gameManager;
   final ManagerStorage storage;
   final ArchiveExtractor extractor;
@@ -54,9 +56,10 @@ class FileManagerController extends ChangeNotifier {
     try {
       grant = await storage.currentGrant();
       _bindService();
+      if (files == null) _clearGrant();
       if (files != null) {
         currentPath = files!.gamesPath;
-        await Directory(currentPath).create(recursive: true);
+        await files!.io.mkdir(currentPath, recursive: true);
         await refresh();
       }
     } on FileOperationException catch (error) {
@@ -78,7 +81,7 @@ class FileManagerController extends ChangeNotifier {
       grant = await storage.authorize();
       _bindService();
       currentPath = files!.gamesPath;
-      await Directory(currentPath).create(recursive: true);
+      await files!.io.mkdir(currentPath, recursive: true);
       await refresh();
     } on FileOperationException catch (error) {
       if (error.code == FileErrorCode.cancelled) return;
@@ -90,12 +93,28 @@ class FileManagerController extends ChangeNotifier {
     }
   }
 
+  void _clearGrant() {
+    grant = null;
+    files = null;
+    currentPath = '';
+    entries = const [];
+    trash = const [];
+    selected.clear();
+    selecting = false;
+    notifyListeners();
+  }
+
   void _bindService() {
     final root = grant;
     files = root == null
         ? null
         : LocalFileService(
             rootPath: root.rootPath,
+            fileSystem:
+                fileSystem ??
+                (root.platform == 'android'
+                    ? AndroidDocumentFileSystem(root.rootPath)
+                    : null),
             onPathChanged: gameManager.relocateBoundPaths,
           );
   }
@@ -106,8 +125,8 @@ class FileManagerController extends ChangeNotifier {
     // The folder being viewed can disappear underneath us (another app,
     // or a restore that recreated a parent). Fall back to games/ rather
     // than showing an empty listing for a path that no longer exists.
-    if (!await Directory(currentPath).exists()) {
-      currentPath = await Directory(service.gamesPath).exists()
+    if (!await service.io.exists(currentPath)) {
+      currentPath = await service.io.exists(service.gamesPath)
           ? service.gamesPath
           : service.rootPath;
       selected.clear();
@@ -127,9 +146,15 @@ class FileManagerController extends ChangeNotifier {
     if (files == null || task != null) return;
     lastError = null;
     try {
+      if (storage.usesAndroidDocumentTree &&
+          await storage.currentGrant() == null) {
+        _clearGrant();
+        return;
+      }
       await refresh();
     } on FileOperationException catch (error) {
       lastError = error;
+      if (error.code == FileErrorCode.permissionDenied) _clearGrant();
       notifyListeners();
     } catch (error) {
       lastError = FileOperationException.from(error);
@@ -281,14 +306,25 @@ class FileManagerController extends ChangeNotifier {
       await runtimeGuard.prepareMutation(source);
       await files!.extract(
         destination,
-        (output) => extractor.unpack(
-          root: files!.rootPath,
-          source: source,
-          destination: output,
-          password: password,
-          legacyCodepage: legacyCodepage,
-          task: _beginTask(),
-        ),
+        (output) => files!.io is AndroidDocumentFileSystem
+            ? unpackDocumentArchive(
+                io: files!.io,
+                extractor: extractor,
+                volumes: _groupFor(source),
+                source: source,
+                output: output,
+                password: password,
+                legacyCodepage: legacyCodepage,
+                task: _beginTask(),
+              )
+            : extractor.unpack(
+                root: files!.rootPath,
+                source: source,
+                destination: output,
+                password: password,
+                legacyCodepage: legacyCodepage,
+                task: _beginTask(),
+              ),
       );
     }, announce: true);
   }
@@ -348,6 +384,7 @@ class FileManagerController extends ChangeNotifier {
       if (announce) notice = ManagerNotice.completed;
     } on FileOperationException catch (error) {
       if (error.code != FileErrorCode.cancelled) lastError = error;
+      if (error.code == FileErrorCode.permissionDenied) _clearGrant();
     } catch (error) {
       lastError = FileOperationException.from(error);
     } finally {

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -9,26 +10,43 @@ import 'package:video_player/video_player.dart';
 
 import '../l10n/app_localizations.dart';
 import '../services/manager_file_kind.dart';
+import '../services/manager_file_system.dart';
+import '../services/android_document_file_system.dart';
 import '../ui/ui.dart';
 
 /// Full-screen preview for a managed image, audio, video or text file.
 class ManagerMediaPage extends StatelessWidget {
-  const ManagerMediaPage({super.key, required this.path, required this.kind});
+  const ManagerMediaPage({
+    super.key,
+    required this.path,
+    required this.kind,
+    this.fileSystem,
+  });
 
   final String path;
   final ManagerFileKind kind;
+  final ManagerFileSystem? fileSystem;
 
   static Future<void> open(
     BuildContext context, {
     required String path,
     required ManagerFileKind kind,
-  }) {
+    ManagerFileSystem? fileSystem,
+  }) async {
     if (kind == ManagerFileKind.image && !path.toLowerCase().endsWith('.svg')) {
-      return UiImageViewer.show(context, images: [FileImage(File(path))]);
+      final ImageProvider image;
+      if (fileSystem is AndroidDocumentFileSystem) {
+        image = MemoryImage(await fileSystem.readBytes(path));
+        if (!context.mounted) return;
+      } else {
+        image = FileImage(File(path));
+      }
+      return UiImageViewer.show(context, images: [image]);
     }
     return Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
-        builder: (_) => ManagerMediaPage(path: path, kind: kind),
+        builder: (_) =>
+            ManagerMediaPage(path: path, kind: kind, fileSystem: fileSystem),
       ),
     );
   }
@@ -49,39 +67,58 @@ class ManagerMediaPage extends StatelessWidget {
         ),
       ),
       body: switch (kind) {
-        ManagerFileKind.image => _ImagePreview(path: path),
-        ManagerFileKind.text => _TextPreview(path: path),
-        _ => _AvPreview(path: path, kind: kind),
+        ManagerFileKind.image => _ImagePreview(
+          path: path,
+          io: fileSystem ?? LocalManagerFileSystem(),
+        ),
+        ManagerFileKind.text => _TextPreview(
+          path: path,
+          io: fileSystem ?? LocalManagerFileSystem(),
+        ),
+        _ => _AvPreview(
+          path: path,
+          kind: kind,
+          io: fileSystem ?? LocalManagerFileSystem(),
+        ),
       },
     );
   }
 }
 
-class _ImagePreview extends StatelessWidget {
-  const _ImagePreview({required this.path});
-
+class _ImagePreview extends StatefulWidget {
+  const _ImagePreview({required this.path, required this.io});
   final String path;
-
+  final ManagerFileSystem io;
   @override
-  Widget build(BuildContext context) {
-    final lower = path.toLowerCase();
-    final child = lower.endsWith('.svg')
-        ? SvgPicture.file(File(path), fit: BoxFit.contain)
-        : Image.file(
-            File(path),
-            fit: BoxFit.contain,
-            errorBuilder: (context, error, stack) => _MediaError(
-              message: AppLocalizations.of(context)!.managerMediaFailed,
-            ),
-          );
-    return Center(
-      child: InteractiveViewer(minScale: 0.5, maxScale: 8, child: child),
-    );
-  }
+  State<_ImagePreview> createState() => _ImagePreviewState();
+}
+
+class _ImagePreviewState extends State<_ImagePreview> {
+  late final Future<Uint8List> _load = widget.io.readBytes(widget.path);
+  @override
+  Widget build(BuildContext context) => FutureBuilder<Uint8List>(
+    future: _load,
+    builder: (context, snapshot) {
+      if (snapshot.hasError) {
+        return _MediaError(
+          message: AppLocalizations.of(context)!.managerMediaFailed,
+        );
+      }
+      final data = snapshot.data;
+      if (data == null) return const Center(child: UiLoader());
+      final image = widget.path.toLowerCase().endsWith('.svg')
+          ? SvgPicture.memory(data, fit: BoxFit.contain)
+          : Image.memory(data, fit: BoxFit.contain);
+      return Center(
+        child: InteractiveViewer(minScale: 0.5, maxScale: 8, child: image),
+      );
+    },
+  );
 }
 
 class _TextPreview extends StatefulWidget {
-  const _TextPreview({required this.path});
+  const _TextPreview({required this.path, required this.io});
+  final ManagerFileSystem io;
 
   final String path;
 
@@ -90,9 +127,9 @@ class _TextPreview extends StatefulWidget {
 }
 
 class _TextPreviewState extends State<_TextPreview> {
-  late final Future<ManagerTextPreview> _load = File(
-    widget.path,
-  ).readAsBytes().then(decodeManagedText);
+  late final Future<ManagerTextPreview> _load = widget.io
+      .readBytes(widget.path, limit: managerTextPreviewLimit + 1)
+      .then(decodeManagedText);
 
   @override
   Widget build(BuildContext context) {
@@ -142,7 +179,8 @@ class _TextPreviewState extends State<_TextPreview> {
 }
 
 class _AvPreview extends StatefulWidget {
-  const _AvPreview({required this.path, required this.kind});
+  const _AvPreview({required this.path, required this.kind, required this.io});
+  final ManagerFileSystem io;
 
   final String path;
   final ManagerFileKind kind;
@@ -158,14 +196,29 @@ class _AvPreviewState extends State<_AvPreview> {
   @override
   void initState() {
     super.initState();
-    final player = VideoPlayerController.file(File(widget.path));
-    _player = player;
-    player.initialize().then((_) {
+    _initialize();
+  }
+
+  bool _loadFailed = false;
+  Future<void> _initialize() async {
+    try {
+      final io = widget.io;
+      final player = io is AndroidDocumentFileSystem
+          ? VideoPlayerController.contentUri(await io.documentUri(widget.path))
+          : VideoPlayerController.file(File(widget.path));
+      if (!mounted) {
+        await player.dispose();
+        return;
+      }
+      _player = player;
+      player.addListener(_onTick);
+      await player.initialize();
       if (!mounted) return;
       setState(() {});
-      player.play();
-    });
-    player.addListener(_onTick);
+      await player.play();
+    } catch (_) {
+      if (mounted) setState(() => _loadFailed = true);
+    }
   }
 
   @override
@@ -184,6 +237,7 @@ class _AvPreviewState extends State<_AvPreview> {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     final player = _player;
+    if (_loadFailed) return _MediaError(message: l10n.managerMediaFailed);
     if (player == null) {
       return const Center(child: UiLoader());
     }

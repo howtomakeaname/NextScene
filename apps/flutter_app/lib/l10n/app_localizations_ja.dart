@@ -13,7 +13,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String managerAndroidAuthorizationHint(String appId) {
-    return 'システム設定でファイルへのアクセスを許可してください。このページでは Download/$appId/ 内のファイルだけを管理します。';
+    return 'システムのフォルダー選択画面で Download/$appId/ を開き、「このフォルダを使用」を押してください。ゲームはその中の games フォルダーに置いてください。';
   }
 
   @override
@@ -899,8 +899,8 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String get androidAllFilesAccess =>
-      'Android では「すべてのファイル」へのアクセス権が必要です。許可してからゲームをもう一度開いてください。';
+  String get androidDirectoryAccess =>
+      'ゲームフォルダーへのアクセスがありません。Download/com.nextscene.app を選び直してから開いてください。';
 
   @override
   String get noXp3InFolder => '選択したフォルダに XP3 アーカイブも Artemis パック（.pfs）も見つかりません。';

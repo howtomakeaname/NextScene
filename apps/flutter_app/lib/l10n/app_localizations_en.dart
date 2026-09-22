@@ -13,7 +13,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String managerAndroidAuthorizationHint(String appId) {
-    return 'Allow file access in system settings. This page manages only files in Download/$appId/.';
+    return 'Select Download/$appId/ in the system folder picker and tap “Use this folder”. Put game folders inside its games folder.';
   }
 
   @override
@@ -930,8 +930,8 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get androidAllFilesAccess =>
-      'All files access is required on Android. Please grant permission and open the game again.';
+  String get androidDirectoryAccess =>
+      'Game directory access is unavailable. Select Download/com.nextscene.app again before opening the game.';
 
   @override
   String get noXp3InFolder =>
