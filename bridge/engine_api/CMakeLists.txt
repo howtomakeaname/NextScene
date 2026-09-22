@@ -45,7 +45,7 @@ endif()
 if(TARGET artemis_core AND TARGET krkr2core)
     target_sources(engine_api PRIVATE src/artemis_runtime.cpp)
     target_compile_definitions(engine_api PRIVATE ENGINE_API_USE_ARTEMIS_RUNTIME)
-    target_link_libraries(engine_api PRIVATE artemis_core)
+    target_link_libraries(engine_api PRIVATE artemis::core)
     message(STATUS "engine_api: Artemis backend enabled")
 endif()
 
