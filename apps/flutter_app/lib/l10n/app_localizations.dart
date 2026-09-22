@@ -106,6 +106,12 @@ abstract class AppLocalizations {
   /// **'Authorize Folder'**
   String get managerAuthorize;
 
+  /// No description provided for @managerAndroidAuthorizationHint.
+  ///
+  /// In en, this message translates to:
+  /// **'Select Download/{appId}/ in the system folder picker and tap “Use this folder”. Put game folders inside its games folder.'**
+  String managerAndroidAuthorizationHint(String appId);
+
   /// No description provided for @managerAuthorizationHint.
   ///
   /// In en, this message translates to:
@@ -1726,11 +1732,11 @@ abstract class AppLocalizations {
   /// **'Game path check failed: {error}'**
   String gamePathCheckFailed(String error);
 
-  /// No description provided for @androidAllFilesAccess.
+  /// No description provided for @androidDirectoryAccess.
   ///
   /// In en, this message translates to:
-  /// **'All files access is required on Android. Please grant permission and open the game again.'**
-  String get androidAllFilesAccess;
+  /// **'Game directory access is unavailable. Select Download/com.nextscene.app again before opening the game.'**
+  String get androidDirectoryAccess;
 
   /// No description provided for @noXp3InFolder.
   ///

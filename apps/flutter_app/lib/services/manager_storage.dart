@@ -3,7 +3,6 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
-import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'file_operation_error.dart';
@@ -16,11 +15,8 @@ import 'manager_scope.dart';
 /// - HarmonyOS: `ensureManagerRoot` (DOWNLOAD picker) through the bridge.
 /// - macOS / Linux / Windows: one directory pick validated by [ManagerScope];
 ///   `dart:io` can use the returned path directly.
-/// - Android / iOS: not available yet. A picker there returns a document
-///   tree or file-provider location, and the string a picker plugin derives
-///   from it is not a path `dart:io` may write to. Reporting
-///   [FileErrorCode.unsupportedPlatform] is safer than a misleading
-///   permission error after a half-finished operation.
+/// - Android: logical Downloads paths backed by a persisted SAF tree grant.
+/// - iOS: file-provider locations still require a separate adapter.
 class ManagerStorage {
   ManagerStorage({
     MethodChannel? channel,
@@ -31,27 +27,36 @@ class ManagerStorage {
        _platform = platform ?? Platform.operatingSystem;
 
   static const _prefsKey = 'krkr2_manager_grant';
-  static const _pathBackedPlatforms = {'ohos', 'macos', 'linux', 'windows'};
+  static const _supportedPlatforms = {
+    'ohos',
+    'android',
+    'macos',
+    'linux',
+    'windows',
+  };
 
   final MethodChannel _channel;
   final Future<String?> Function()? _pickDirectory;
   final String _platform;
 
+  bool get usesAndroidDocumentTree => _platform == 'android';
+
   String get appId => ManagerScope.expectedAppId(_platform);
 
   /// True when file management can run on this platform at all.
-  bool get isSupported => _pathBackedPlatforms.contains(_platform);
+  bool get isSupported => _supportedPlatforms.contains(_platform);
 
   Future<ManagerGrant?> currentGrant() async {
     if (!isSupported) {
       throw const FileOperationException(FileErrorCode.unsupportedPlatform);
     }
-    if (_platform == 'ohos') {
+    if (_platform == 'ohos' || _platform == 'android') {
       try {
-        return await _ensureOhosRoot(promptIfMissing: false);
+        return await _ensureNativeRoot(promptIfMissing: false);
       } on FileOperationException catch (error) {
         if (error.code == FileErrorCode.permissionDenied ||
-            error.code == FileErrorCode.cancelled) {
+            error.code == FileErrorCode.cancelled ||
+            error.code == FileErrorCode.notFound) {
           return null;
         }
         rethrow;
@@ -84,8 +89,8 @@ class ManagerStorage {
     if (!isSupported) {
       throw const FileOperationException(FileErrorCode.unsupportedPlatform);
     }
-    if (_platform == 'ohos') {
-      final grant = await _ensureOhosRoot(promptIfMissing: true);
+    if (_platform == 'ohos' || _platform == 'android') {
+      final grant = await _ensureNativeRoot(promptIfMissing: true);
       if (grant == null) {
         throw const FileOperationException(FileErrorCode.permissionDenied);
       }
@@ -115,7 +120,9 @@ class ManagerStorage {
     await prefs.remove(_prefsKey);
   }
 
-  Future<ManagerGrant?> _ensureOhosRoot({required bool promptIfMissing}) async {
+  Future<ManagerGrant?> _ensureNativeRoot({
+    required bool promptIfMissing,
+  }) async {
     try {
       final info = await _channel.invokeMapMethod<String, dynamic>(
         'ensureManagerRoot',
@@ -125,21 +132,15 @@ class ManagerStorage {
       if (root == null || root.isEmpty) return null;
       final grant = ManagerScope.grantFromSelection(
         root,
-        appId: (info?['appId'] as String?) ?? appId,
-        platform: 'ohos',
+        appId: appId,
+        platform: _platform,
       );
       if (grant == null) {
         throw const FileOperationException(FileErrorCode.outsideRoot);
       }
-      return ManagerGrant(
-        rootPath: grant.rootPath,
-        gamesPath: (info?['games'] as String?)?.isNotEmpty == true
-            ? p.normalize(info!['games'] as String)
-            : grant.gamesPath,
-        displayRoot: (info?['display'] as String?) ?? grant.displayRoot,
-        appId: grant.appId,
-        platform: 'ohos',
-      );
+      // Derive child paths locally so a malformed native response cannot
+      // move file operations outside the validated app directory.
+      return grant;
     } on PlatformException catch (error) {
       throw FileOperationException.from(error);
     } on MissingPluginException {

@@ -41,7 +41,9 @@ fi
 
 BUILD_TYPE_CAP="$(echo "${BUILD_TYPE_LOWER:0:1}" | tr '[:lower:]' '[:upper:]')${BUILD_TYPE_LOWER:1}"
 
-if [[ -d "$PROJECT_ROOT/.devtools/flutter" ]]; then
+if [[ -n "${FLUTTER_SDK:-}" && -x "$FLUTTER_SDK/bin/flutter" ]]; then
+    FLUTTER_BIN="$FLUTTER_SDK/bin/flutter"
+elif [[ -d "$PROJECT_ROOT/.devtools/flutter" ]]; then
     FLUTTER_SDK="$PROJECT_ROOT/.devtools/flutter"
     FLUTTER_BIN="$FLUTTER_SDK/bin/flutter"
 elif command -v flutter >/dev/null 2>&1; then
@@ -95,6 +97,7 @@ if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
 fi
 
 PARALLEL_JOBS="${JOBS:-8}"
+VCPKG_INSTALLED_DIR="${VCPKG_INSTALLED_DIR:-$VCPKG_ROOT/installed}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -199,6 +202,8 @@ log_info "Parallel jobs:  $PARALLEL_JOBS"
 log_step "Step 1/3: Installing vcpkg dependencies for Android"
 
 export VCPKG_ROOT
+export VCPKG_INSTALLED_DIR
+export VCPKG_MAX_CONCURRENCY="$PARALLEL_JOBS"
 export ANDROID_NDK_HOME
 export ANDROID_HOME
 
@@ -216,7 +221,7 @@ wait_for_vcpkg_lock() {
     while (( attempt < max_retries )); do
         # Try a vcpkg command that actually acquires the filesystem lock.
         # 'vcpkg list' needs the lock, unlike 'vcpkg version' which does not.
-        if (cd "$PROJECT_ROOT" && "$VCPKG_BIN" list --x-install-root="$VCPKG_ROOT/installed" &>/dev/null); then
+        if (cd "$PROJECT_ROOT" && "$VCPKG_BIN" list --x-install-root="$VCPKG_INSTALLED_DIR" &>/dev/null); then
             return 0
         fi
         attempt=$((attempt + 1))
@@ -238,17 +243,10 @@ for ABI in "${ABI_ARRAY[@]}"; do
     # Wait for any previous vcpkg lock to be released
     wait_for_vcpkg_lock
 
-    # Clean stale ANGLE build cache to ensure overlay port changes take effect
-    if [[ -d "$VCPKG_ROOT/buildtrees/angle" ]]; then
-        log_info "Cleaning ANGLE build cache for rebuild..."
-        rm -rf "$VCPKG_ROOT/buildtrees/angle"
-        rm -rf "$VCPKG_ROOT/packages/angle_${TRIPLET}"
-    fi
-
     # Use manifest mode: vcpkg install from project root where vcpkg.json lives
     (cd "$PROJECT_ROOT" && "$VCPKG_BIN" install \
         --triplet "$TRIPLET" \
-        --x-install-root="$VCPKG_ROOT/installed" \
+        --x-install-root="$VCPKG_INSTALLED_DIR" \
         --x-manifest-root="$PROJECT_ROOT" \
         --overlay-ports="$OVERLAY_PORTS" \
         --overlay-triplets="$OVERLAY_TRIPLETS" \
@@ -267,16 +265,28 @@ done
 # ============================================================
 log_step "Step 2/3: Building Flutter Android APK ($BUILD_TYPE_CAP)"
 
+# The OHOS Flutter fork also initializes OHOS tooling during pub get.
+if [[ -d "$FLUTTER_SDK/packages/flutter_tools/lib/src/ohos" ]]; then
+    DEVECO_APP="${DEVECO_APP:-/Applications/DevEco-Studio.app}"
+    if [[ -d "$DEVECO_APP/Contents/tools/node/bin" ]]; then
+        export DEVECO_SDK_HOME="${DEVECO_SDK_HOME:-$DEVECO_APP/Contents/sdk}"
+        export NODE_HOME="${NODE_HOME:-$DEVECO_APP/Contents/tools/node}"
+        export PATH="$DEVECO_APP/Contents/tools/node/bin:$DEVECO_APP/Contents/tools/ohpm/bin:$DEVECO_APP/Contents/tools/hvigor/bin:$PATH"
+    fi
+fi
 export PATH="$FLUTTER_SDK/bin:$PATH"
 
+# Local OHOS overrides point at platform ports. Do not use them in an APK.
+OVERRIDES="$FLUTTER_APP_DIR/pubspec_overrides.yaml"
+OVERRIDES_BACKUP=""
+if [[ -f "$OVERRIDES" ]] && grep -q 'ohos_flutter_packages' "$OVERRIDES"; then
+    OVERRIDES_BACKUP="$(mktemp "${TMPDIR:-/tmp}/nextscene-ohos-overrides.XXXXXX")"
+    cp "$OVERRIDES" "$OVERRIDES_BACKUP"
+    rm "$OVERRIDES"
+    trap 'mv "$OVERRIDES_BACKUP" "$OVERRIDES"' EXIT
+fi
 log_info "Running flutter pub get..."
 (cd "$FLUTTER_APP_DIR" && "$FLUTTER_BIN" pub get)
-
-# Clean CMake cache to avoid stale configurations
-if [[ -d "$FLUTTER_APP_DIR/build/.cxx" ]]; then
-    log_info "Cleaning CMake build cache..."
-    rm -rf "$FLUTTER_APP_DIR/build/.cxx"
-fi
 
 FLUTTER_BUILD_MODE="$BUILD_TYPE_LOWER"
 
@@ -314,11 +324,6 @@ else
     APK_PATH="$FLUTTER_APP_DIR/build/app/outputs/flutter-apk/app-$FLUTTER_BUILD_MODE.apk"
 fi
 
-if [[ ! -f "$APK_PATH" ]]; then
-    # Try to find any APK
-    APK_PATH="$(find "$FLUTTER_APP_DIR/build/app/outputs" -name "*.apk" -type f 2>/dev/null | head -1)"
-fi
-
 if [[ -z "${APK_PATH:-}" || ! -f "${APK_PATH:-}" ]]; then
     log_error "APK not found! Build may have failed."
     exit 1
@@ -353,5 +358,5 @@ log_info "To install on a connected device:"
 echo "  adb install \"$APK_PATH\""
 echo ""
 log_info "To install and run:"
-echo "  adb install \"$APK_PATH\" && adb shell am start -n org.github.krkr2.flutter_app/.MainActivity"
+echo "  adb install \"$APK_PATH\" && adb shell am start -n com.nextscene.app/org.github.krkr2.flutter_app.MainActivity"
 echo ""

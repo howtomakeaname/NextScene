@@ -1,0 +1,5 @@
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -41,1 +41,2 @@
++#include <cstdlib>  // malloc/free require an explicit include with newer libc++.
+ #include "base.h"

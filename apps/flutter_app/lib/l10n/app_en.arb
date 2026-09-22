@@ -1,6 +1,8 @@
 {
   "@@locale": "en",
   "managerAuthorize": "Authorize Folder",
+  "managerAndroidAuthorizationHint": "Select Download/{appId}/ in the system folder picker and tap “Use this folder”. Put game folders inside its games folder.",
+  "@managerAndroidAuthorizationHint": { "placeholders": { "appId": { "type": "String" } } },
   "managerAuthorizationHint": "Select this app’s folder inside Downloads. Other folders cannot be managed.",
   "managerEmpty": "This folder is empty",
   "managerNewFolder": "New Folder",
@@ -405,7 +407,7 @@
       "error": { "type": "String" }
     }
   },
-  "androidAllFilesAccess": "All files access is required on Android. Please grant permission and open the game again.",
+  "androidDirectoryAccess": "Game directory access is unavailable. Select Download/com.nextscene.app again before opening the game.",
   "noXp3InFolder": "No XP3 archive or Artemis pack (.pfs) found in the selected folder.",
   "gameTypeArtemis": "Artemis pack (.pfs)",
   "gameEngine": "Engine: {engine}",

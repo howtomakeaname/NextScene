@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -50,6 +51,37 @@ void main() {
   tearDown(() async {
     controller.dispose();
     if (await fixture.exists()) await fixture.delete(recursive: true);
+  });
+
+  test('Android opens the games directory used by HarmonyOS', () async {
+    const channel = MethodChannel('android-manager-controller-test');
+    final root = controller.files!.rootPath;
+    await File(
+      p.join(root, 'games', 'FolderGame', 'data.xp3'),
+    ).create(recursive: true);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (_) async => {'root': root});
+    final android = FileManagerController(
+      gameManager: games,
+      storage: ManagerStorage(platform: 'android', channel: channel),
+      fileSystem: LocalManagerFileSystem(),
+    );
+    try {
+      await android.authorize();
+      expect(android.lastError, isNull);
+      expect(android.currentPath, p.join(root, 'games'));
+      expect(
+        android.entries.map((entry) => entry.name),
+        contains('FolderGame'),
+      );
+      await android.load();
+      expect(android.currentPath, p.join(root, 'games'));
+      expect(android.canGoBack, isTrue);
+    } finally {
+      android.dispose();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    }
   });
 
   test('rename updates library path and keeps the save folder name', () async {

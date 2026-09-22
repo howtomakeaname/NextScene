@@ -6,7 +6,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
-import android.provider.Settings
 import android.util.Log
 import android.view.Surface
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -33,6 +32,7 @@ class FlutterEngineBridgePlugin :
     private var activity: Activity? = null
     private var activityBinding: ActivityPluginBinding? = null
     private var pendingPickResult: Result? = null
+    private lateinit var directoryAccess: AndroidDirectoryAccess
 
     // SurfaceTexture zero-copy textures (Android equivalent of IOSurface)
     private val surfaceTextures = mutableMapOf<Long, TextureRegistry.SurfaceTextureEntry>()
@@ -60,6 +60,7 @@ class FlutterEngineBridgePlugin :
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         binding = flutterPluginBinding
+        directoryAccess = AndroidDirectoryAccess(binding.applicationContext)
         textureRegistry = flutterPluginBinding.textureRegistry
         engineAttached = true
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "flutter_engine_bridge")
@@ -80,41 +81,10 @@ class FlutterEngineBridgePlugin :
             result.error("detached", "Flutter engine is detached", null)
             return
         }
+        if (engineAttached && directoryAccess.handle(call, result, activity)) return
         when (call.method) {
             "getPlatformVersion" -> {
                 result.success("Android ${Build.VERSION.RELEASE}")
-            }
-
-            "hasManageExternalStorage" -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    result.success(Environment.isExternalStorageManager())
-                } else {
-                    result.success(true)
-                }
-            }
-
-            "requestManageExternalStorage" -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    val ctx = binding.applicationContext
-                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                        .setData(Uri.parse("package:${ctx.packageName}"))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    try {
-                        ctx.startActivity(intent)
-                        result.success(true)
-                    } catch (_: Exception) {
-                        val fallbackIntent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        try {
-                            ctx.startActivity(fallbackIntent)
-                            result.success(true)
-                        } catch (e: Exception) {
-                            result.error("permission", "Failed to open all-files access settings: ${e.message}", null)
-                        }
-                    }
-                } else {
-                    result.success(true)
-                }
             }
 
             // --- SurfaceTexture zero-copy (Android equivalent of IOSurface) ---
@@ -345,6 +315,11 @@ class FlutterEngineBridgePlugin :
     }
 
     override fun onDetachedFromActivity() {
+        directoryAccess.detach()
+        clearActivityBinding()
+    }
+
+    private fun clearActivityBinding() {
         activityBinding?.removeActivityResultListener(this)
         activity = null
         activityBinding = null
@@ -355,10 +330,12 @@ class FlutterEngineBridgePlugin :
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
-        onDetachedFromActivity()
+        // Keep the pending authorization across Activity recreation.
+        clearActivityBinding()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (directoryAccess.onActivityResult(requestCode, resultCode, data)) return true
         if (requestCode != PICK_FILE_REQUEST) return false
         val result = pendingPickResult
         pendingPickResult = null
@@ -375,6 +352,7 @@ class FlutterEngineBridgePlugin :
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        directoryAccess.detach()
         engineAttached = false
         channel.setMethodCallHandler(null)
 

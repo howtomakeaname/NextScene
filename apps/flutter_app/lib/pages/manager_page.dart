@@ -248,7 +248,9 @@ class _ManagerPageState extends State<ManagerPage> {
       return UiEmpty(
         icon: LucideIcons.folderLock,
         title: l10n.tabManage,
-        description: l10n.managerAuthorizationHint,
+        description: controller.storage.usesAndroidDocumentTree
+            ? l10n.managerAndroidAuthorizationHint(controller.storage.appId)
+            : l10n.managerAuthorizationHint,
         actionLabel: l10n.managerAuthorize,
         onAction: controller.authorize,
       );
@@ -346,7 +348,12 @@ class _ManagerPageState extends State<ManagerPage> {
   }
 
   Future<void> _openMedia(LocalFileEntry entry, ManagerFileKind kind) {
-    return ManagerMediaPage.open(context, path: entry.path, kind: kind);
+    return ManagerMediaPage.open(
+      context,
+      path: entry.path,
+      kind: kind,
+      fileSystem: controller.files?.io,
+    );
   }
 
   Future<void> _showDetails(LocalFileEntry entry, AppLocalizations l10n) {

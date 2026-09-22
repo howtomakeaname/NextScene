@@ -1,6 +1,7 @@
 {
   "@@locale": "ja",
   "managerAuthorize": "フォルダへのアクセスを許可",
+  "managerAndroidAuthorizationHint": "システムのフォルダー選択画面で Download/{appId}/ を開き、「このフォルダを使用」を押してください。ゲームはその中の games フォルダーに置いてください。",
   "managerAuthorizationHint": "ダウンロード内の本アプリ専用フォルダを選択してください。他のフォルダは管理できません。",
   "managerEmpty": "このフォルダは空です",
   "managerNewFolder": "新規フォルダ",
@@ -345,7 +346,7 @@
   "gamePathNotExist": "ゲームパスが存在しません: {path}",
   "missingStartupScript": "起動スクリプトが見つかりません: {path}\n（startup.tjs と data/system/initialize.tjs を確認済み）",
   "gamePathCheckFailed": "ゲームパスの確認に失敗しました: {error}",
-  "androidAllFilesAccess": "Android では「すべてのファイル」へのアクセス権が必要です。許可してからゲームをもう一度開いてください。",
+  "androidDirectoryAccess": "ゲームフォルダーへのアクセスがありません。Download/com.nextscene.app を選び直してから開いてください。",
   "noXp3InFolder": "選択したフォルダに XP3 アーカイブも Artemis パック（.pfs）も見つかりません。",
   "gameTypeArtemis": "Artemis パック（.pfs）",
   "gameEngine": "エンジン: {engine}",

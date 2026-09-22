@@ -16,8 +16,12 @@ import '../config/app_info.dart';
 import '../constants/prefs_keys.dart';
 import '../flows/game_metadata_scrape_flow.dart';
 import '../l10n/app_localizations.dart';
+import '../l10n/file_manager_localizations.dart';
 import '../models/game_engine.dart';
 import '../models/game_info.dart';
+import '../services/android_document_file_system.dart';
+import '../services/engine_runtime_guard.dart';
+import '../services/game_directory_scanner.dart';
 import '../services/file_manager_controller.dart';
 import '../services/game_manager.dart';
 import '../services/local_file_service.dart';
@@ -53,10 +57,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _loading = true;
   bool _startupScanInProgress = false;
   String? _iosGamesDir;
-  // OHOS: sandbox path of Download/<bundleName>/games (and its short label
-  // for UI copy). Users drop whole game folders here with the file manager.
-  String? _ohosGamesDir;
-  String? _ohosGamesDirDisplay;
+  // Platform-provided public drop directory and its short display label.
+  String? _publicGamesDir;
+  String? _publicGamesDirDisplay;
   // On Android/iOS the engine is always built-in; EngineMode switching is
   // only meaningful on desktop platforms.
   EngineMode _engineMode = EngineMode.builtIn;
@@ -148,11 +151,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // Coming back from the file manager after copying a game in: pick it up
     // without making the user pull to refresh.
     if (state == AppLifecycleState.resumed &&
-        Platform.operatingSystem == 'ohos' &&
+        (Platform.isAndroid || Platform.operatingSystem == 'ohos') &&
         !_loading &&
         !_startupScanInProgress &&
         !_fileManager.blocksLibraryScan) {
-      unawaited(_refreshOhosGames(silent: true));
+      unawaited(_refreshPublicGames(silent: true));
     }
   }
 
@@ -188,7 +191,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted) return;
 
     final needsStartupScan =
-        Platform.isIOS || Platform.operatingSystem == 'ohos';
+        Platform.isIOS ||
+        Platform.isAndroid ||
+        Platform.operatingSystem == 'ohos';
     setState(() {
       _loading = false;
       _startupScanInProgress = needsStartupScan;
@@ -207,9 +212,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await _gameManager.applyPendingPlaySession();
       if (Platform.isIOS) {
         await _initIosGamesDir();
-      } else if (Platform.operatingSystem == 'ohos') {
-        await _initOhosGamesDir();
-        await _scanOhosGamesDir();
+      } else if (Platform.isAndroid || Platform.operatingSystem == 'ohos') {
+        await _initPublicGamesDir();
+        await _scanPublicGamesDir();
       }
     } catch (error, stackTrace) {
       debugPrint('Background home initialization failed: $error');
@@ -221,36 +226,66 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  /// OHOS: resolve (and on first run create) `Download/<bundleName>/games/`.
-  ///
-  /// The app owns `Download/<bundleName>/` without any permission prompt;
-  /// the native side creates it through a silent DOWNLOAD-mode picker save
-  /// and hands back the sandbox path. Failure leaves [_ohosGamesDir] null
-  /// and the rest of the import flow (hdc side-load, network) still works.
-  Future<void> _initOhosGamesDir() async {
-    if (_ohosGamesDir != null) return;
+  /// Both mobile adapters return `Download/{appId}/games`. Android requires
+  /// storage authorization first. Resolve again on resume so
+  /// revoked Android permission cannot leave a cached path in use.
+  Future<void> _initPublicGamesDir() async {
+    if (_publicGamesDir != null && !Platform.isAndroid) return;
     try {
       final info = await _platformChannel.invokeMapMethod<String, dynamic>(
         'ensurePublicGamesDir',
       );
       final path = info?['path'] as String?;
-      if (path == null || path.isEmpty) return;
-      _ohosGamesDir = path;
-      _ohosGamesDirDisplay = (info?['display'] as String?) ?? path;
+      if (path == null || path.isEmpty) {
+        _publicGamesDir = null;
+        if (Platform.isAndroid && !GameRuntimeBinding.pageActive) {
+          await GameRuntimeBinding.releaseParked();
+        }
+        return;
+      }
+      _publicGamesDir = path;
+      _publicGamesDirDisplay = (info?['display'] as String?) ?? path;
     } on PlatformException catch (e) {
+      _publicGamesDir = null;
       debugPrint('ensurePublicGamesDir failed: ${e.code} ${e.message}');
     } on MissingPluginException {
       // Older native plugin without this method.
     }
   }
 
-  /// OHOS: register games that appeared under [_ohosGamesDir] and drop
+  /// Register games that appeared under [_publicGamesDir] and drop
   /// entries whose folder the user has since deleted. Returns the number of
   /// newly added games.
-  Future<int> _scanOhosGamesDir() async {
-    final dirPath = _ohosGamesDir;
+  Future<int> _scanPublicGamesDir() async {
+    final dirPath = _publicGamesDir;
     if (dirPath == null) return 0;
     if (_fileManager.blocksLibraryScan) return 0;
+    if (Platform.isAndroid) {
+      final io = AndroidDocumentFileSystem(p.dirname(dirPath));
+      final candidates = await GameDirectoryScanner(io).scan(dirPath);
+      for (final game in List<GameInfo>.of(_gameManager.games)) {
+        if (!p.isWithin(dirPath, game.path) ||
+            LocalFileService.isPrivatePath(game.path)) {
+          continue;
+        }
+        if (!await io.exists(game.path)) {
+          await _gameManager.markUnavailable(game.path);
+        } else if (!game.available) {
+          await _gameManager.markAvailable(game.path);
+        }
+      }
+      final registered = _gameManager.games.map((g) => g.path).toSet();
+      var added = 0;
+      for (final candidate in candidates.entries) {
+        if (!registered.contains(candidate.key) &&
+            await _gameManager.addGame(
+              GameInfo(path: candidate.key, engine: candidate.value),
+            )) {
+          added++;
+        }
+      }
+      return added;
+    }
     final root = Directory(dirPath);
     if (!root.existsSync()) return 0;
 
@@ -290,20 +325,31 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return added;
   }
 
-  /// OHOS: rescan the public games folder. [silent] skips the result toast
+  /// Rescan the public games folder. [silent] skips the result toast
   /// (lifecycle-triggered scans); pull-to-refresh and the menu report back.
-  Future<void> _refreshOhosGames({bool silent = false}) async {
-    await _initOhosGamesDir();
-    final added = await _scanOhosGamesDir();
-    if (!mounted) return;
-    if (added > 0 || !silent) setState(() {});
-    if (silent) return;
-    final l10n = AppLocalizations.of(context)!;
-    UiToast.show(
-      context,
-      message: added > 0 ? l10n.gamesImported(added) : l10n.noNewGamesFound,
-      type: added > 0 ? UiToastType.success : UiToastType.info,
-    );
+  Future<void> _refreshPublicGames({bool silent = false}) async {
+    try {
+      await _initPublicGamesDir();
+      final added = await _scanPublicGamesDir();
+      if (!mounted) return;
+      if (added > 0 || !silent) setState(() {});
+      if (silent) return;
+      final l10n = AppLocalizations.of(context)!;
+      UiToast.show(
+        context,
+        message: added > 0 ? l10n.gamesImported(added) : l10n.noNewGamesFound,
+        type: added > 0 ? UiToastType.success : UiToastType.info,
+      );
+    } catch (error) {
+      if (!mounted || silent) return;
+      UiToast.show(
+        context,
+        message: AppLocalizations.of(
+          context,
+        )!.fileOperationError(FileOperationException.from(error).code),
+        type: UiToastType.error,
+      );
+    }
   }
 
   Future<void> _initIosGamesDir() async {
@@ -376,6 +422,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _addGame({Rect? anchor}) async {
+    if (Platform.isAndroid) {
+      await _authorizeAndroidGamesDirectory();
+      return;
+    }
     final l10n = AppLocalizations.of(context)!;
     if (Platform.isIOS) {
       await _scanIosGamesDir();
@@ -395,7 +445,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           icon: LucideIcons.archive,
           value: 'xp3',
         ),
-        if (Platform.operatingSystem == 'ohos')
+        if (Platform.isAndroid || Platform.operatingSystem == 'ohos')
           UiMenuItem(
             label: l10n.rescanGamesDir,
             icon: LucideIcons.scanSearch,
@@ -405,11 +455,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
     if (source == null || !mounted) return;
 
-    if (source == 'sandbox') {
+    if (source == 'sandbox' && Platform.isAndroid) {
+      await _authorizeAndroidGamesDirectory();
+    } else if (source == 'sandbox') {
       await _addGameFromSandbox();
     } else {
       await _addGameArchive();
     }
+  }
+
+  Future<void> _authorizeAndroidGamesDirectory() async {
+    await _fileManager.authorize();
+    if (!mounted) return;
+    final error = _fileManager.lastError;
+    if (error != null) {
+      UiToast.show(
+        context,
+        message: AppLocalizations.of(context)!.fileOperationError(error.code),
+        type: UiToastType.error,
+      );
+      return;
+    }
+    await _refreshPublicGames();
   }
 
   // Kept for future entry points; the home import menu currently hides it.
@@ -830,7 +897,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return destPath;
   }
 
-  /// OHOS: register games that were side-loaded into the app sandbox (or one
+  /// Register games that were side-loaded into the app sandbox (or one
   /// of the developer roots) with `hdc file send`. Finds KiriKiri archives,
   /// unpacked KiriKiri directories and Artemis pack directories alike.
   Future<void> _addGameFromSandbox() async {
@@ -841,10 +908,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // both surface <root>/data.xp3.
     // Public games folder first: it is the documented drop location, so
     // anything new there should surface even if the scan roots below fail.
-    await _initOhosGamesDir();
+    await _initPublicGamesDir();
     final candidates = <String>{};
     final roots = <Directory>[docDir];
-    final publicGames = _ohosGamesDir;
+    final publicGames = _publicGamesDir;
     if (publicGames != null && Directory(publicGames).existsSync()) {
       roots.add(Directory(publicGames));
     }
@@ -1203,6 +1270,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       MaterialPageRoute<void>(
         builder: (_) => GamePage(
           gamePath: game.path,
+          engine: game.engine,
           title: game.displayTitle,
           coverPath: game.coverPath,
           saveDirectoryName: game.saveDirectoryName,
@@ -1273,7 +1341,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           angleBackend: _angleBackend,
           gameOrientation: _gameOrientation,
           restartPending: _restartDeferred,
-          publicGamesDir: _ohosGamesDirDisplay,
+          publicGamesDir: _publicGamesDirDisplay,
         ),
       ),
     );
@@ -1376,11 +1444,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         !Platform.isAndroid &&
         !Platform.isIOS &&
         Platform.operatingSystem != 'ohos';
-    // Pull-to-refresh rescans the drop folder (iOS: Documents/Games,
-    // OHOS: Download/<bundleName>/games). Desktop and Android pick games
-    // through a picker, so there is nothing to rescan there.
-    final isOhos = Platform.operatingSystem == 'ohos';
-    final canPullRefresh = isOhos || Platform.isIOS;
+    // Mobile libraries rescan their public drop directory on refresh.
+    final hasPublicDropDirectory =
+        Platform.isAndroid || Platform.operatingSystem == 'ohos';
+    final canPullRefresh = hasPublicDropDirectory || Platform.isIOS;
 
     // The title bar stays put; only the library below it scrolls and pulls.
     const collapsedToolbarWidth = 94.0;
@@ -1590,8 +1657,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           refreshingText: l10n.refreshing,
           doneText: l10n.refreshDone,
           onRefresh: () async {
-            if (isOhos) {
-              await _refreshOhosGames();
+            if (Platform.isAndroid && _publicGamesDir == null) {
+              await _authorizeAndroidGamesDirectory();
+            } else if (hasPublicDropDirectory) {
+              await _refreshPublicGames();
             } else {
               await _scanIosGamesDir();
               if (mounted) setState(() {});
@@ -1703,9 +1772,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       description = l10n.noGamesHintIos(
         AppInfo.nameForLanguage(l10n.localeName),
       );
-    } else if (Platform.operatingSystem == 'ohos') {
+    } else if (Platform.isAndroid || Platform.operatingSystem == 'ohos') {
       description = l10n.noGamesHintOhos(
-        _ohosGamesDirDisplay ?? 'Download/<bundleName>/games',
+        _publicGamesDirDisplay ?? 'Download/${AppInfo.bundleId}/games',
       );
     } else {
       description = l10n.noGamesHintDesktop;

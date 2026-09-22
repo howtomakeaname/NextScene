@@ -35,3 +35,19 @@
   builds pass.
 
 The implementation plan and evidence are in `doc/artemis-embedding-work.md`.
+
+## Android storage
+
+- Use a persisted SAF grant for `Download/com.nextscene.app/`. Keep games in its
+  `games/` child, matching HarmonyOS. Do not restore all-files storage permission.
+- Manager and library paths are logical identifiers on Android, not permission to
+  call `dart:io` or POSIX directly. Route operations through the document backend;
+  native readers own and close ContentResolver descriptors. Keep saves in app data.
+- Validate cancellation, exact-root selection, persisted/revoked grants, Unicode
+  paths, archive sibling discovery, file operations and descriptor release on an
+  Android device or emulator. Host-only tests cannot verify Android URI grants.
+- Archive extraction may stage the selected archive job in cache; normal game
+  playback must not mirror the game into the app sandbox.
+- Android Artemis `.pfs` playback is part of the supported path. Keep the
+  engine's pack provider descriptor-based; do not make Android Artemis silently
+  fall back to a copied pack or raw `opendir`/`fopen` on the SAF logical path.
