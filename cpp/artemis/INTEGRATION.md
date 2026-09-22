@@ -2,11 +2,9 @@
 
 `upstream/` is the complete artemis-compat Git submodule, pinned by the parent
 repository. The current integration uses upstream commit
-`9180c6627f3f3b066f8900b1c213055224f8c252` from `docs/clarify-compatibility-comments`.
-The embedding changes are merged upstream in PR #1; PR #2 contains the subsequent
-comment and documentation cleanup. The pinned commit is published; builds never
-follow a branch. Relative to the previously tested `a4d922b`, only comments and
-documentation changed.
+`52c8091704b6382ff1352c059b24e732ba25b786` on upstream `main`, after PRs #1 and #2
+were merged. Builds use this exact commit, never a moving branch. Relative to the
+previously tested `a4d922b`, only comments and documentation changed.
 
 ```sh
 git submodule update --init --recursive

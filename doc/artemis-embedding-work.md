@@ -53,13 +53,14 @@ HAP 路径：`apps/flutter_app/build/ohos/hap/entry-default-signed.hap`。
 
 ## 依赖与回退
 
-引擎固定到已发布的 `9180c6627f3f3b066f8900b1c213055224f8c252`。
+引擎固定到上游 main 已合并的 `52c8091704b6382ff1352c059b24e732ba25b786`。
 构建与生命周期改动已通过上游 PR #1 合并（合并提交 `5da0b38`）：
 https://github.com/Weiss-UltimateSavior/artemis-compat/pull/1。
-当前指针另外包含注释与文档清理 PR #2：
+注释与文档清理 PR #2 也已合并，合并树与已检查的 `9180c66` 完全一致：
 https://github.com/Weiss-UltimateSavior/artemis-compat/pull/2。
 上述构建与设备结果对应 `a4d922b` 的实现；此后只改注释和文档，未重新运行
 设备测试。源码注释增删检查与 `git diff --check` 通过。
+合并前使用最终子模块重新构建 NextScene 的 Artemis 测试入口，22/22 回归通过。
 通用修复分为规范、Lua 音频所有权、夹具、构建后端、构建测试、会话接口与文档七个提交。
 主项目的源码改 submodule 是一次机械迁移，Git 会显示大量旧文件删除；宿主 API
 适配与指针一起提交以避免产生不能构建的中间版本，重复测试/音频文件清理另有提交。
