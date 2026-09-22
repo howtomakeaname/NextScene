@@ -96,7 +96,7 @@ class _DocumentStat implements FileStat {
           : FileSystemEntityType.file,
       size = (value?['size'] as num?)?.toInt() ?? 0,
       modified = DateTime.fromMillisecondsSinceEpoch(
-        (value?['modified'] as num?)?.toInt() ?? 0,
+        ((value?['modified'] as num?)?.toInt() ?? 0) * 1000,
       );
   @override
   final FileSystemEntityType type;

@@ -148,7 +148,9 @@ void main() {
             .setMockMethodCallHandler(channel, null),
       );
       final documents = AndroidDocumentFileSystem(root, channel: channel);
-      expect((await documents.stat('$root/games/file')).size, 42);
+      final metadata = await documents.stat('$root/games/file');
+      expect(metadata.size, 42);
+      expect(metadata.modified, DateTime.fromMillisecondsSinceEpoch(1000000));
       await expectLater(
         documents.validateAncestors(root, '$root/../outside'),
         throwsA(
