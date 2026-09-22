@@ -192,7 +192,7 @@ void main() {
   ) async {
     final unsupported = FileManagerController(
       gameManager: GameManager(),
-      storage: ManagerStorage(platform: 'android'),
+      storage: ManagerStorage(platform: 'ios'),
     );
     await tester.pumpWidget(
       UiThemeScope(
