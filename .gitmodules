@@ -1,0 +1,3 @@
+[submodule "cpp/artemis/upstream"]
+	path = cpp/artemis/upstream
+	url = https://github.com/Weiss-UltimateSavior/artemis-compat.git

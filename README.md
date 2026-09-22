@@ -124,12 +124,12 @@ hdc install -r apps/flutter_app/build/ohos/hap/entry-default-signed.hap
 
 ### Artemis 引擎游戏（.pfs）
 
-OHOS 版额外内置了 [artemis-compat](https://github.com/Weiss-UltimateSavior/artemis-compat)（clean-room 的 Artemis Engine 兼容运行时，GPL-3.0，vendored 于 `cpp/artemis/`，pin 见 `cpp/artemis/upstream/UPSTREAM.md`），同一个 `libengine_api.so` 按游戏路径自动分发：`.pfs` 封包或含 `.pfs` 的目录走 Artemis 后端，其余走 KiriKiri2。
+OHOS 版额外内置了 [artemis-compat](https://github.com/Weiss-UltimateSavior/artemis-compat)（Artemis Engine 兼容运行时，GPL-3.0，以完整 Git submodule 固定在 `cpp/artemis/upstream`，版本及接入说明见 [INTEGRATION.md](cpp/artemis/INTEGRATION.md)），同一个 `libengine_api.so` 按游戏路径自动分发：`.pfs` 封包或含 `.pfs` 的目录走 Artemis 后端，其余走 KiriKiri2。
 
 - 渲染：GLES2 图层合成器绘制到与 krkr2 共用的 EGL pbuffer，经 RawImage 读回呈现（静态帧按图层修订号跳过读回）；音频走 OHAudio（每声部独立 renderer）
 - 导入：游戏目录需包含主包 `root.pfs` 及其补丁卷 `root.pfs.000/.001…`，存档 `*.dat` 写在同目录。放到 `Download/com.nextscene.app/games` 后回首页下拉刷新，或在「库」里用「添加游戏」选目录 / PFS。`hdc file send` 送入后同样走刷新或添加游戏注册（适配层会把封包链与存档整体拷入 cache 再迁入 files）
-- 兼容范围沿用上游并在本仓库修补/补全了若干引擎行为（`e:random` 整数语义、`e:loadPngComments` 表情锚点、图层变换组合、`[stop]`/`[return]` 调用栈语义、跨文件 `[return]`、点击命中事件层、`lytween` 补间与 `trans` 过渡、`wait se=`/`setonsoundfinish` 音效等待，清单见 `cpp/artemis/upstream/UPSTREAM.md`）：模拟器实测《常轨脱离 Creative 凸》标题（含入场动画）→ STORY SELECT → 序章选项 → 剧情文本/立绘/名牌全程推进，引擎日志无 Lua 报错
-- 仍未实现：视频播放（`video` 标签直接跳过，剧情自动续接）、E-mote 动态立绘（M2 闭源中间件，无法实现）、`anime` 逐帧动画与 `rotate` 补间
+- 引擎行为与可复用后端在上游维护，NextScene 负责窗口、呈现与帧循环。当前构建、真机验证及限制见[接入测试记录](doc/artemis-embedding-work.md)，历史功能验证见[兼容性记录](doc/artemis-compatibility-audit.md)
+- Android/iOS 的应用级验收、Apple 音频和异步 Flutter 输入弹窗仍待推进；引擎能力与已知缺口以上游固定版本为准。新克隆或切到此版本后，先执行 `git submodule update --init --recursive`
 - 日志：hilog tag `Artemis`（domain `0x0207`），同时写入 `krkr2-engine.log`（前缀 `[artemis]`）
 
 

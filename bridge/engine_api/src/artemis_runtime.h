@@ -5,7 +5,7 @@
  * KrKr2-Next exposes one C API (engine_api.h) to the Flutter host. The
  * KiriKiri2 runtime implements it directly in engine_api.cpp; this class
  * implements the same lifecycle for Artemis games (`.pfs` pack chains) on
- * top of the vendored clean-room runtime in cpp/artemis, so the Dart side
+ * top of the pinned artemis-compat runtime in cpp/artemis/upstream, so the Dart side
  * needs no engine-specific code path: engine_open_game_async() detects the
  * pack, and tick / frame readback / input / pause flow through unchanged.
  *

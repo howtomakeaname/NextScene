@@ -273,7 +273,8 @@ static void TVPRegisterProxyFsStub() {
     spdlog::info("Registered proxy storage media stub for missing proxyfs.dll");
 }
 
-// gamepad.dll 未实现时注册 stub，避免 exgamepad.tjs 访问 GamepadPort 报错（逆向见：global["GamepadPort"]/["Gamepad"]，脚本用 SystemConfig.GamepadPort）
+// gamepad.dll 不可用时注册 GamepadPort / Gamepad 占位对象，兼容
+// exgamepad.tjs 对全局对象和 SystemConfig.GamepadPort 的访问。
 static void TVPRegisterGamepadStub() {
     iTJSDispatch2 *stub = new tTJSNC_GamepadStub();
     if(!stub)

@@ -26,12 +26,13 @@
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 
-#include "config/ini.h"
+#include "core/engine_context.h"
+#include "audio/audio.h"
+#include "audio/audio_channels.h"
 #include "log/logger.h"
 #include "pack/pack_manager.h"
 #include "render/compositor.h"
 #include "script/asb_parser.h"
-#include "script/iet_interpreter.h"
 #include "script/lua_engine.h"
 
 #include "visual/ogl/krkr_egl_context.h"
@@ -152,15 +153,15 @@ struct ArtemisRuntime::Impl {
   // ---- game state ----
   std::string pack_path;
   std::string save_dir;
-  artc::PackManager packs;
-  artc::Ini ini;
+  std::unique_ptr<artc::EngineContext> engine;
   int stage_w = 1280;
   int stage_h = 720;
   std::string os_name = "android";
 
-  artc::Compositor compositor;
-  artc::AsbRunner runner;
-  std::unique_ptr<artc::LuaEngine> lua;
+  // Borrowed from engine; clear together whenever the session is dropped.
+  artc::Compositor* compositor = nullptr;
+  artc::AsbRunner* runner = nullptr;
+  artc::LuaEngine* lua = nullptr;
   bool booted = false;
   bool open = false;
   bool paused = false;
@@ -265,63 +266,30 @@ bool ArtemisRuntime::Impl::MakeCurrent(std::string* error) {
 // ---------------------------------------------------------------------------
 
 void ArtemisRuntime::Impl::ReleaseLua() {
-  // The Lua engine owns the audio backend; dropping it stops every voice.
-  lua.reset();
+  lua = nullptr;
+  runner = nullptr;
+  if (engine && engine->Opened()) {
+    engine->ResetSession();
+    // NextScene has always stopped voices on [reset]. Core keeps audio alive
+    // for other hosts, so preserve this policy explicitly here.
+    engine->sounds().Reset();
+    engine->audio().StopAll();
+  }
   booted = false;
 }
 
 bool ArtemisRuntime::Impl::Boot(std::string* error) {
-  compositor.ReleaseGl();
-  compositor.SetPackManager(&packs);
-  compositor.Init(stage_w, stage_h);  // builds the GLES2 program (ctx current)
-  compositor.SetPresent(nullptr);     // presentation is driven by Tick()
-
-  lua = std::make_unique<artc::LuaEngine>();
-  lua->SetSaveDir(save_dir);
-  if (!lua->Init(&packs, ini, os_name, stage_w, stage_h, &compositor)) {
-    if (error) *error = "artemis: Lua engine initialization failed";
+  if (!engine->Start(true) || !engine->BootFramework(false)) {
+    if (error) *error = "artemis: engine session or framework initialization failed";
     ReleaseLua();
     return false;
   }
-  Log("artemis: lua ready; running system/first.iet");
-  artc::IetRunner iet(&packs, lua.get());
-  if (!iet.Run("system/first.iet")) {
-    if (error) *error = "artemis: system/first.iet missing or unreadable";
-    ReleaseLua();
-    return false;
-  }
-  if (iet.Stopped()) Log("artemis: boot script hit [stop]");
-
-  runner = artc::AsbRunner();
-  runner.SetPackSource(&packs);
-  lua->SetScriptRunner(&runner);
-  artc::AsbRunner* r = &runner;
-  artc::LuaEngine* l = lua.get();
-  lua->SetJumpHandler([this, r](const std::string& file, const std::string& label) {
-    r->Jump(file, label);
-  });
-  lua->SetCallHandler([this, r](const std::string& file, const std::string& label) {
-    r->Call(file, label);
-  });
-  lua->SetStopHandler([this, r](const std::string& tag) {
-    // [stop] halts the script until an explicit jump/call re-enters it
-    // (choice screens park at `script.asb *select [stop]` inside the estag
-    // call frame and resume through `jump select_exit → [return]`);
-    // [return] pops the call frame. Popping on `stop` — the upstream
-    // heuristic — let the main loop run past a pending choice.
-    if (tag == "stop") {
-      r->Halt();
-      Log("asb: stop via lua tag (halt)");
-      return;
-    }
-    if (!r->Return()) {
-      r->Halt();
-      Log("asb: " + tag + " via lua tag");
-    }
-  });
-
+  compositor = &engine->compositor();
+  compositor->SetPresent(nullptr);  // Tick owns presentation.
+  lua = &engine->lua();
+  runner = &engine->runner();
   booted = true;
-  drawn_revision = ~0ull;  // force a readback of the first composed frame
+  drawn_revision = ~0ull;
   Log("artemis: boot sequence finished, adv framework active");
   return true;
 }
@@ -341,41 +309,26 @@ bool ArtemisRuntime::Open(const std::string& game_path, std::string* error) {
   s.save_dir = DirName(pack_path);
   s.Log("artemis: pack chain base: " + pack_path);
 
-  if (!s.packs.OpenChain(pack_path, {})) {
-    if (error) *error = "artemis: cannot open pf8 pack chain (unknown key/format): " + pack_path;
+  s.engine = std::make_unique<artc::EngineContext>();
+  if (!s.engine->Open(pack_path, s.os_name, {}, s.save_dir)) {
+    if (error) *error = "artemis: cannot open pf8 pack chain: " + pack_path;
+    Close();
     return false;
   }
-  s.Log("artemis: pack chain opened: " + std::to_string(s.packs.Packs().size()) +
-        " pack(s), first pack " +
-        std::to_string(s.packs.Packs().empty() ? 0u : s.packs.Packs()[0]->FileCount()) +
-        " file(s)");
-
-  std::vector<uint8_t> ini_bytes;
-  if (s.packs.Read("system.ini", ini_bytes)) {
-    s.ini.Parse(std::string(ini_bytes.begin(), ini_bytes.end()));
-  } else {
-    s.Log("artemis: system.ini not found in pack; using 1280x720 defaults");
+  s.stage_w = s.engine->stageW();
+  s.stage_h = s.engine->stageH();
+  s.Log("artemis: stage " + std::to_string(s.stage_w) + "x" + std::to_string(s.stage_h));
+  if (!s.EnsureEgl(error)) {
+    Close();
+    return false;
   }
-  // Stage resolution: the mobile section carries the stage size on every
-  // title we know of; fall back to WINDOWS when a PC-only pack omits it.
-  int w = s.ini.GetInt("ANDROID", "WIDTH", 0);
-  int h = s.ini.GetInt("ANDROID", "HEIGHT", 0);
-  if (w <= 0 || h <= 0) {
-    w = s.ini.GetInt("WINDOWS", "WIDTH", 1280);
-    h = s.ini.GetInt("WINDOWS", "HEIGHT", 720);
-  }
-  s.stage_w = std::max(1, w);
-  s.stage_h = std::max(1, h);
-  s.Log("artemis: stage " + std::to_string(s.stage_w) + "x" + std::to_string(s.stage_h) +
-        " os=" + s.os_name + " save_dir=" + s.save_dir);
-
-  if (!s.EnsureEgl(error)) return false;
 
   const bool ok = s.Boot(error);
   // Startup runs on a worker thread; release the context so the owner
   // thread can make it current before ticking (same as the krkr2 path).
   krkr::GetEngineEGLContext().ReleaseCurrent();
   if (!ok) {
+    Close();
     return false;
   }
   s.open = true;
@@ -399,10 +352,10 @@ void ArtemisRuntime::Impl::DrainQueuedTags() {
         if (kv.first == "file") file = kv.second;
         else if (kv.first == "label") label = kv.second;
       }
-      if (name == "call") runner.Call(file, label);
-      else runner.Jump(file, label);
+      if (name == "call") runner->Call(file, label);
+      else runner->Jump(file, label);
     } else {
-      lua->DispatchTag(name, attrs);
+      lua->DispatchTag(name, attrs, false);
     }
   }
 }
@@ -481,9 +434,9 @@ void ArtemisRuntime::Impl::ProcessInput() {
 
 void ArtemisRuntime::Impl::StepScript() {
   if (!lua) return;
-  if (runner.Loaded() && !runner.Halted() && !lua->IsWaiting()) {
-    for (int steps = 0; steps < 4 && runner.Loaded() && !runner.Halted(); ++steps) {
-      runner.ExecuteLine(*lua);
+  if (runner->Loaded() && !runner->Halted() && !lua->IsWaiting()) {
+    for (int steps = 0; steps < 4 && runner->Loaded() && !runner->Halted(); ++steps) {
+      runner->ExecuteLine(*lua);
       // command-boundary queue processing (estag chains)
       DrainQueuedTags();
       if (lua->IsWaiting()) break;
@@ -524,7 +477,7 @@ bool ArtemisRuntime::Impl::ReadbackFrame() {
 void ArtemisRuntime::Impl::Present(bool force) {
   auto& egl = krkr::GetEngineEGLContext();
   const bool to_window = egl.HasNativeWindow() && native_win_w > 0 && native_win_h > 0;
-  const uint64_t rev = compositor.Revision();
+  const uint64_t rev = compositor->Revision();
   if (!force && !to_window && rev == drawn_revision) {
     // Static frame: the pbuffer still holds identical pixels; skip both
     // the GL pass and the readback (same gate as the krkr2 software path).
@@ -553,7 +506,7 @@ void ArtemisRuntime::Impl::Present(bool force) {
     glClearColor(0.f, 0.f, 0.f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
     glViewport(vp_x, vp_y, vp_w, vp_h);
-    compositor.Draw();
+    compositor->Draw();
     if (!eglSwapBuffers(egl.GetDisplay(), egl.GetWindowSurface())) {
       Log("artemis: eglSwapBuffers failed: 0x" + std::to_string(eglGetError()));
     }
@@ -565,7 +518,7 @@ void ArtemisRuntime::Impl::Present(bool force) {
   glViewport(0, 0, stage_w, stage_h);
   glClearColor(0.f, 0.f, 0.f, 1.f);
   glClear(GL_COLOR_BUFFER_BIT);
-  compositor.Draw();
+  compositor->Draw();
   if (ReadbackFrame()) {
     drawn_revision = rev;
     frame_dirty = true;
@@ -617,17 +570,17 @@ ArtemisRuntime::TickStatus ArtemisRuntime::Tick(std::string* error) {
   s.StepScript();
   // Advance [lytween] / [trans] animations to this frame's time before
   // compositing (bumps the layer revision while anything is moving).
-  if (s.lua) s.compositor.Update(s.lua->NowMs());
+  if (s.lua) s.compositor->Update(s.lua->NowMs());
   s.Present(force_present);
   if (s.lua) s.lua->EndFrame();  // clear per-frame edges
 
   if (s.tick_count % 600 == 0) {
     s.Log("artemis: tick=" + std::to_string(s.tick_count) +
           " waiting=" + std::to_string(s.lua && s.lua->IsWaiting() ? 1 : 0) +
-          " runner=" + std::to_string(s.runner.Loaded() ? 1 : 0) +
-          (s.runner.Halted() ? " halted" : "") +
-          " rev=" + std::to_string(s.compositor.Revision()) +
-          " draw: " + s.compositor.DescribeDrawList(24));
+          " runner=" + std::to_string(s.runner->Loaded() ? 1 : 0) +
+          (s.runner->Halted() ? " halted" : "") +
+          " rev=" + std::to_string(s.compositor->Revision()) +
+          " draw: " + s.compositor->DescribeDrawList(24));
   }
   return TickStatus::kOk;
 }
@@ -710,15 +663,25 @@ void ArtemisRuntime::MarkFrameDirty() {
 
 void ArtemisRuntime::Close() {
   Impl& s = *impl_;
-  if (!s.open && !s.lua && !s.owns_egl) return;
+  if (!s.engine && !s.owns_egl) return;
   auto& egl = krkr::GetEngineEGLContext();
   const bool current = egl.IsValid() && egl.MakeCurrent();
   s.ReleaseLua();
-  if (current) {
-    s.compositor.Shutdown();  // frees textures + program on the live context
-  }
-  s.runner = artc::AsbRunner();
+  if (!current && s.compositor) s.Log("artemis: GL context unavailable during teardown");
+  s.compositor = nullptr;
+  // Destroy the entire graph while EGL is still current, including all audio
+  // callbacks and open pack descriptors, before releasing host resources.
+  s.engine.reset();
   s.frame_rgba.clear();
+  s.flip_row.clear();
+  s.paused = false;
+  s.frame_dirty = false;
+  s.drawn_revision = ~0ull;
+  s.tick_count = 0;
+  {
+    std::lock_guard<std::mutex> lk(s.input_mutex);
+    s.input_events.clear();
+  }
   s.open = false;
   if (egl.IsValid()) {
     if (egl.HasNativeWindow()) egl.DetachNativeWindow();
