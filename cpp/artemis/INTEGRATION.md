@@ -2,8 +2,11 @@
 
 `upstream/` is the complete artemis-compat Git submodule, pinned by the parent
 repository. The current integration uses upstream commit
-`a4d922bb3a9e90b9e65502a3baf30f1b849346bd` from `feat/embedded-host-support`.
-That commit is published in the upstream repository; builds never follow a branch.
+`9180c6627f3f3b066f8900b1c213055224f8c252` from `docs/clarify-compatibility-comments`.
+The embedding changes are merged upstream in PR #1; PR #2 contains the subsequent
+comment and documentation cleanup. The pinned commit is published; builds never
+follow a branch. Relative to the previously tested `a4d922b`, only comments and
+documentation changed.
 
 ```sh
 git submodule update --init --recursive

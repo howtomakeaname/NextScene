@@ -53,8 +53,13 @@ HAP 路径：`apps/flutter_app/build/ohos/hap/entry-default-signed.hap`。
 
 ## 依赖与回退
 
-引擎固定到已发布的 `a4d922bb3a9e90b9e65502a3baf30f1b849346bd`，
-上游 PR：https://github.com/Weiss-UltimateSavior/artemis-compat/pull/1。
+引擎固定到已发布的 `9180c6627f3f3b066f8900b1c213055224f8c252`。
+构建与生命周期改动已通过上游 PR #1 合并（合并提交 `5da0b38`）：
+https://github.com/Weiss-UltimateSavior/artemis-compat/pull/1。
+当前指针另外包含注释与文档清理 PR #2：
+https://github.com/Weiss-UltimateSavior/artemis-compat/pull/2。
+上述构建与设备结果对应 `a4d922b` 的实现；此后只改注释和文档，未重新运行
+设备测试。源码注释增删检查与 `git diff --check` 通过。
 通用修复分为规范、Lua 音频所有权、夹具、构建后端、构建测试、会话接口与文档七个提交。
 主项目的源码改 submodule 是一次机械迁移，Git 会显示大量旧文件删除；宿主 API
 适配与指针一起提交以避免产生不能构建的中间版本，重复测试/音频文件清理另有提交。
@@ -66,3 +71,8 @@ HAP 路径：`apps/flutter_app/build/ohos/hap/entry-default-signed.hap`。
 本批次没有启用 Android/iOS 应用的 Artemis 默认入口。iOS 缺完整 Xcode，也仍缺
 Apple 音频；原始 Android jar 行为、异步 Flutter 输入弹窗、真正 GL context loss
 恢复和完整跨平台应用验收继续单独推进。
+
+2026-09-22 后续核对了 Tyranor-Next 的实际 Kotlin Activity 和插件加载器，
+不再以缺少原始 jar 作为该宿主接口核对的障碍。PAD 回调签名、按键/视频完成
+回调和音频桥符号仍有原有兼容缺口；详情见上游 `docs/embedding.md`。
+Android 设备运行仍未验证。
