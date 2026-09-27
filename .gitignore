@@ -14,7 +14,7 @@ vcpkg_installed/
 .act/
 .devtools
 *.md
-!doc/artemis-compatibility-audit.md
+!docs/artemis-compatibility-audit.md
 !cpp/artemis/tests/data/README.md
 *.lock
 /stats_server
