@@ -28,31 +28,31 @@ The screenshots below were captured on a physical HarmonyOS SDK 20 device. Portr
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="doc/screenshots/home.webp" alt="Game library home screen" width="280"><br>
+      <img src="docs/screenshots/home.webp" alt="Game library home screen" width="280"><br>
       <sub>Library</sub>
     </td>
     <td align="center" width="50%">
-      <img src="doc/screenshots/home-context-menu.webp" alt="Home screen long-press menu" width="280"><br>
+      <img src="docs/screenshots/home-context-menu.webp" alt="Home screen long-press menu" width="280"><br>
       <sub>Long-press quick actions</sub>
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
-      <img src="doc/screenshots/game-detail.webp" alt="Game details screen" width="280"><br>
+      <img src="docs/screenshots/game-detail.webp" alt="Game details screen" width="280"><br>
       <sub>Game details</sub>
     </td>
     <td align="center" width="50%">
-      <img src="doc/screenshots/settings.webp" alt="Settings screen" width="280"><br>
+      <img src="docs/screenshots/settings.webp" alt="Settings screen" width="280"><br>
       <sub>Settings</sub>
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
-      <img src="doc/screenshots/manage.webp" alt="Manage" width="280"><br>
+      <img src="docs/screenshots/manage.webp" alt="Manage" width="280"><br>
       <sub>Manage</sub>
     </td>
     <td align="center" width="50%">
-      <img src="doc/screenshots/profile.webp" alt="Me" width="280"><br>
+      <img src="docs/screenshots/profile.webp" alt="Me" width="280"><br>
       <sub>Me</sub>
     </td>
   </tr>
@@ -61,19 +61,19 @@ The screenshots below were captured on a physical HarmonyOS SDK 20 device. Portr
 ### Game Running in Landscape
 
 <p align="center">
-  <img src="doc/screenshots/game-running-landscape.webp" alt="9-nine- Episode 1 running in landscape on a HarmonyOS device" width="600"><br>
+  <img src="docs/screenshots/game-running-landscape.webp" alt="9-nine- Episode 1 running in landscape on a HarmonyOS device" width="600"><br>
   <sub>*9-nine- Episode 1: Miyako Kujo* title screen · KiriKiri2 / GLES · ~90 fps</sub>
 </p>
 
 <p align="center">
-  <img src="doc/screenshots/game-controls.webp" alt="In-game quick controls" width="600"><br>
+  <img src="docs/screenshots/game-controls.webp" alt="In-game quick controls" width="600"><br>
   <sub>In-game quick controls (pause / virtual pad / exit)</sub>
 </p>
 
 ## Architecture
 
 <p align="center">
-  <img src="doc/architecture.png" alt="Architecture Diagram" width="700">
+  <img src="docs/architecture.png" alt="Architecture Diagram" width="700">
 </p>
 
 **Rendering Pipeline**: On desktop and most mobile targets the engine renders offscreen through ANGLE's EGL Pbuffer (OpenGL ES 2.0), then hands the frame to Flutter via platform texture sharing (macOS → IOSurface, Windows → D3D11 Texture, Linux → DMA-BUF). HarmonyOS skips ANGLE and uses system EGL (GLES) into a pbuffer, presented through OHNativeWindow / RawImage readback.
@@ -146,7 +146,7 @@ The OHOS build additionally bundles [artemis-compat](https://github.com/Weiss-Ul
 
 - Rendering: the GLES2 layer compositor draws into the same EGL pbuffer krkr2 uses and frames are presented through the RawImage readback (static frames skip the readback based on the layer revision counter); audio goes through OHAudio (one renderer per voice)
 - Import: the game directory must contain the base pack `root.pfs` plus its patch volumes `root.pfs.000/.001…`; saves (`*.dat`) are written next to it. Drop the folder into `Download/com.nextscene.app/games` and pull-to-refresh on Library, or use Add Game to pick the folder / PFS. `hdc file send` followed by the same refresh or Add Game path also works (the ArkTS layer copies the pack chain and saves into the cache, then the app moves them into `files`)
-- Engine behavior and reusable backends are maintained upstream; NextScene owns the window, presentation and frame loop. See the [integration test record](doc/artemis-embedding-work.md) for current builds, device checks and limits, and the [compatibility record](doc/artemis-compatibility-audit.md) for earlier feature validation
+- Engine behavior and reusable backends are maintained upstream; NextScene owns the window, presentation and frame loop. See the [integration test record](docs/artemis-embedding-work.md) for current builds, device checks and limits, and the [compatibility record](docs/artemis-compatibility-audit.md) for earlier feature validation
 - Android/iOS application validation, Apple audio and asynchronous Flutter input dialogs remain pending. Engine features and known gaps follow the pinned upstream revision. After cloning or switching to this version, run `git submodule update --init --recursive`
 - Logs: hilog tag `Artemis` (domain `0x0207`), mirrored into `krkr2-engine.log` with an `[artemis]` prefix
 

@@ -27,24 +27,24 @@
 
 |                                                 |                                                            |
 | ----------------------------------------------- | ---------------------------------------------------------- |
-| ![游戏库首页](doc/screenshots/home.webp) 库           | ![首页长按快捷菜单](doc/screenshots/home-context-menu.webp) 长按快捷菜单 |
-| ![游戏详情页](doc/screenshots/game-detail.webp) 游戏详情 | ![设置页](doc/screenshots/settings.webp) 设置                   |
-| ![文件管理](doc/screenshots/manage.webp) 管理         | ![我的](doc/screenshots/profile.webp) 我的                     |
+| ![游戏库首页](docs/screenshots/home.webp) 库           | ![首页长按快捷菜单](docs/screenshots/home-context-menu.webp) 长按快捷菜单 |
+| ![游戏详情页](docs/screenshots/game-detail.webp) 游戏详情 | ![设置页](docs/screenshots/settings.webp) 设置                   |
+| ![文件管理](docs/screenshots/manage.webp) 管理         | ![我的](docs/screenshots/profile.webp) 我的                     |
 
 
 
 
 ### 游戏运行（横屏）
 
-![HarmonyOS 真机横屏运行 9-nine-九次九日九重色](doc/screenshots/game-running-landscape.webp)  
+![HarmonyOS 真机横屏运行 9-nine-九次九日九重色](docs/screenshots/game-running-landscape.webp)  
 《9-nine-九次九日九重色》标题画面 （KiriKiri2 / GLES ，约 90 fps）
 
-![游戏内快捷控制](doc/screenshots/game-controls.webp)  
+![游戏内快捷控制](docs/screenshots/game-controls.webp)  
 游戏内快捷控制（暂停 / 虚拟操控手柄 / 退出）
 
 ## 架构
 
-![技术架构图](doc/architecture.png)
+![技术架构图](docs/architecture.png)
 
 **渲染管线**：macOS 等桌面/移动端走 ANGLE 的 EGL Pbuffer 离屏渲染（OpenGL ES 2.0），再经平台纹理共享（macOS → IOSurface、Windows → D3D11 Texture、Linux → DMA-BUF）交给 Flutter Texture。HarmonyOS 不经 ANGLE，直接用系统 EGL（GLES）画到 pbuffer，再经 OHNativeWindow / RawImage 读回显示。
 
@@ -128,7 +128,7 @@ OHOS 版额外内置了 [artemis-compat](https://github.com/Weiss-UltimateSavior
 
 - 渲染：GLES2 图层合成器绘制到与 krkr2 共用的 EGL pbuffer，经 RawImage 读回呈现（静态帧按图层修订号跳过读回）；音频走 OHAudio（每声部独立 renderer）
 - 导入：游戏目录需包含主包 `root.pfs` 及其补丁卷 `root.pfs.000/.001…`，存档 `*.dat` 写在同目录。放到 `Download/com.nextscene.app/games` 后回首页下拉刷新，或在「库」里用「添加游戏」选目录 / PFS。`hdc file send` 送入后同样走刷新或添加游戏注册（适配层会把封包链与存档整体拷入 cache 再迁入 files）
-- 引擎行为与可复用后端在上游维护，NextScene 负责窗口、呈现与帧循环。当前构建、真机验证及限制见[接入测试记录](doc/artemis-embedding-work.md)，历史功能验证见[兼容性记录](doc/artemis-compatibility-audit.md)
+- 引擎行为与可复用后端在上游维护，NextScene 负责窗口、呈现与帧循环。当前构建、真机验证及限制见[接入测试记录](docs/artemis-embedding-work.md)，历史功能验证见[兼容性记录](docs/artemis-compatibility-audit.md)
 - Android/iOS 的应用级验收、Apple 音频和异步 Flutter 输入弹窗仍待推进；引擎能力与已知缺口以上游固定版本为准。新克隆或切到此版本后，先执行 `git submodule update --init --recursive`
 - 日志：hilog tag `Artemis`（domain `0x0207`），同时写入 `krkr2-engine.log`（前缀 `[artemis]`）
 
