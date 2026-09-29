@@ -256,6 +256,19 @@ struct ArtemisRuntime::Impl {
   };
   std::mutex input_mutex;
   std::deque<RawInput> input_events;
+  // A tap whose press and release land in the same batch would show the
+  // framework both key edges in a single frame; its long-tap watch
+  // (vsync.lua) only works when the press spans frames, so the release is
+  // carried into the next frame's batch.
+  bool defer_tap_release_ = false;
+  float defer_tap_x_ = 0, defer_tap_y_ = 0;
+  // dragout fires after the release frame's vsync pass: the save/load
+  // screen's longtap watch converts a non-dragged release into ENTER
+  // (key 146 → save_click → save_check) during vsync, and the framework's
+  // dragout handler clears that watch — the original engine's event order
+  // lets the conversion win, so a tap on an occupied slot loads. Mirrors
+  // the same ordering fix in upstream src/jni/native_activity.cpp.
+  bool end_drag_pending_ = false;
 
   void Log(const std::string& line) {
     if (log) log(line);
@@ -267,6 +280,7 @@ struct ArtemisRuntime::Impl {
   void ReleaseLua();
   void DrainQueuedTags();
   void ProcessInput();
+  void FlushDeferredEndDrag();
   void StepScript();
   void StageFromWindow(float wx, float wy, float* sx, float* sy) const;
   void Present(bool force = false);
@@ -466,8 +480,19 @@ void ArtemisRuntime::Impl::ProcessInput() {
     batch.swap(input_events);
   }
   if (!lua) return;
+  // Flush a tap release deferred from the previous batch (see above): the
+  // framework sees one full frame of held state between the edges.
+  if (defer_tap_release_) {
+    defer_tap_release_ = false;
+    lua->PushKeyUp(kKeyTap);
+    lua->SetTouchCount(0);
+    const bool was_dragging = lua->DragActive();
+    if (was_dragging) end_drag_pending_ = true;  // dragout after vsync
+    if (!was_dragging) lua->ClickAt(defer_tap_x_, defer_tap_y_);
+  }
   int touch_count = 0;
   bool tapped = false;
+  bool tap_down_in_batch = false;
   float tap_x = 0, tap_y = 0;
   for (const auto& ev : batch) {
     if (ev.is_key) {
@@ -493,12 +518,20 @@ void ArtemisRuntime::Impl::ProcessInput() {
     if (ev.down) {
       lua->PushKeyDown(kKeyTap);
       touch_count = 1;
+      tap_down_in_batch = true;
       lua->BeginDrag(sx, sy);
+    } else if (tap_down_in_batch) {
+      // Same-batch press+release: defer the release to the next frame.
+      tap_down_in_batch = false;
+      defer_tap_release_ = true;
+      defer_tap_x_ = sx;
+      defer_tap_y_ = sy;
+      continue;
     } else {
       lua->PushKeyUp(kKeyTap);
       touch_count = 0;
       const bool was_dragging = lua->DragActive();
-      lua->EndDrag();
+      if (was_dragging) end_drag_pending_ = true;  // dragout after vsync
       if (!was_dragging) {  // a clean tap, not a drag
         tapped = true;
         tap_x = sx;
@@ -509,6 +542,14 @@ void ArtemisRuntime::Impl::ProcessInput() {
   }
   // Hit-test taps against lyevent-registered layers (framework buttons).
   if (tapped && lua) lua->ClickAt(tap_x, tap_y);
+}
+
+// dragout deferred from the release batch: fires after the release frame's
+// vsync pass so the framework's longtap→ENTER conversion wins first.
+void ArtemisRuntime::Impl::FlushDeferredEndDrag() {
+  if (!end_drag_pending_) return;
+  end_drag_pending_ = false;
+  if (lua) lua->EndDrag();
 }
 
 void ArtemisRuntime::Impl::StepScript() {
@@ -645,6 +686,7 @@ ArtemisRuntime::TickStatus ArtemisRuntime::Tick(std::string* error) {
   if (s.lua) {
     s.lua->RunEnterFrame();
     s.DrainQueuedTags();  // input-dispatched calllua may enqueue (estag call etc.)
+    s.FlushDeferredEndDrag();  // dragout after the release frame's vsync
   }
   s.StepScript();
   // Advance [lytween] / [trans] animations to this frame's time before
