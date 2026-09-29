@@ -435,7 +435,19 @@ bool ArtemisRuntime::Open(const std::string& game_path, std::string* error) {
 void ArtemisRuntime::Impl::DrainQueuedTags() {
   // Drain the enqueueTag queue at a command boundary. A queued "wait"
   // (eqwait) engages the wait here, which stops further draining.
+  //
+  // A queued control transfer (jump/call) is only consumed while the runner
+  // is parked (halted / not loaded), one at a time: the boot chain enqueues
+  // `call system/msg.iet` followed by `jump label=game_start`, and the
+  // jump's bare label must resolve in the file the call returns to
+  // (first.iet) — consuming it while msg.iet is still on the cursor would
+  // misresolve game_start to macro2.iet's macro of the same name and skip
+  // the title screen. estag chains are unaffected: their items dispatch
+  // through the plain-tag path below.
   while (lua && !lua->IsWaiting() && lua->HasQueuedTag()) {
+    const std::string next = lua->QueuedTagName();
+    const bool transfer = next == "jump" || next == "call";
+    if (transfer && runner->Loaded() && !runner->Halted()) break;
     std::string name;
     std::vector<std::pair<std::string, std::string>> attrs;
     if (!lua->PopQueuedTag(&name, &attrs)) break;
@@ -447,6 +459,7 @@ void ArtemisRuntime::Impl::DrainQueuedTags() {
       }
       if (name == "call") runner->Call(file, label);
       else runner->Jump(file, label);
+      break;
     } else {
       lua->DispatchTag(name, attrs, false);
     }
