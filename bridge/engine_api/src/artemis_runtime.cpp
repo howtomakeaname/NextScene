@@ -13,10 +13,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <dirent.h>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -76,6 +78,104 @@ std::string StripTrailingSlash(std::string p) {
 std::string DirName(const std::string& p) {
   const size_t slash = p.find_last_of("/\\");
   return slash == std::string::npos ? std::string(".") : p.substr(0, slash);
+}
+
+std::string BaseName(const std::string& p) {
+  const std::string t = StripTrailingSlash(p);
+  const size_t slash = t.find_last_of("/\\");
+  return slash == std::string::npos ? t : t.substr(slash + 1);
+}
+
+uint32_t Fn1a32(const std::string& s) {
+  uint32_t h = 2166136261u;
+  for (unsigned char c : s) { h ^= c; h *= 16777619u; }
+  return h;
+}
+
+// Every Artemis game gets its own save area under the shared writable root.
+// With one shared directory all games read and write a single system.dat
+// variable bank, so one game's persisted config (e.g. a ui_lang the other
+// game's packs don't provide) leaks into the next game's boot and can break
+// it entirely; same-named per-slot save files (save0001.dat …) would also
+// clobber each other across games.  The leaf name is the game folder plus a
+// short hash of its full path so same-named folders stay apart.
+std::string PerGameSaveDir(const std::string& writable_root,
+                           const std::string& game_dir) {
+  char suffix[9];
+  std::snprintf(suffix, sizeof(suffix), "%08x", Fn1a32(game_dir));
+  return StripTrailingSlash(writable_root) + "/artemis-saves/" +
+         BaseName(game_dir) + "-" + suffix;
+}
+
+void MakeDirs(const std::string& path) {
+  std::string cur;
+  for (size_t i = 0; i < path.size(); ++i) {
+    cur.push_back(path[i]);
+    if (path[i] == '/' && cur.size() > 1) {
+      ::mkdir(cur.c_str(), 0755);  // EEXIST is fine
+    }
+  }
+  ::mkdir(path.c_str(), 0755);
+}
+
+bool CopyFileBytes(const std::string& from, const std::string& to) {
+  FILE* in = std::fopen(from.c_str(), "rb");
+  if (in == nullptr) return false;
+  FILE* out = std::fopen(to.c_str(), "wb");
+  if (out == nullptr) { std::fclose(in); return false; }
+  char buf[65536];
+  size_t n;
+  bool ok = true;
+  while ((n = std::fread(buf, 1, sizeof(buf), in)) > 0) {
+    if (std::fwrite(buf, 1, n, out) != n) { ok = false; break; }
+  }
+  if (std::ferror(in)) ok = false;
+  std::fclose(in);
+  if (std::fclose(out) != 0) ok = false;
+  return ok;
+}
+
+// One-time seed for a fresh per-game save area: historical builds kept the
+// sidecar bank and slot files next to the pack, so pick up system.dat /
+// saveg.dat / save*.dat from the game folder when it is directly readable
+// (SAF logical paths are not).  An already-populated save area is never
+// touched.  The previous shared root is deliberately NOT seeded from: its
+// contents are an untraceable mix of every game's data.
+void SeedSaveDirFromGameDir(const std::string& save_dir,
+                            const std::string& game_dir,
+                            const std::function<void(const std::string&)>& log) {
+  if (!IsDirectory(save_dir) || !IsDirectory(game_dir)) return;
+  // Never seed over an established save area.
+  DIR* existing = ::opendir(save_dir.c_str());
+  if (existing != nullptr) {
+    while (dirent* ent = ::readdir(existing)) {
+      if (EndsWith(ToLower(ent->d_name), ".dat")) {
+        ::closedir(existing);
+        return;
+      }
+    }
+    ::closedir(existing);
+  }
+  DIR* d = ::opendir(game_dir.c_str());
+  if (d == nullptr) return;
+  int seeded = 0;
+  while (dirent* ent = ::readdir(d)) {
+    const std::string name = ent->d_name;
+    const std::string lower = ToLower(name);
+    const bool wanted = lower == "system.dat" || lower == "saveg.dat" ||
+                        (lower.rfind("save", 0) == 0 && EndsWith(lower, ".dat"));
+    if (!wanted) continue;
+    const std::string from = game_dir + "/" + name;
+    if (!IsRegularFile(from)) continue;
+    if (CopyFileBytes(from, save_dir + "/" + name)) {
+      ++seeded;
+      log("artemis: seeded save file from game dir: " + name);
+    }
+  }
+  ::closedir(d);
+  if (seeded > 0)
+    log("artemis: migrated " + std::to_string(seeded) +
+        " sidecar save file(s) into per-game save area");
 }
 
 // Base packs are `<name>.pfs`; patch volumes `<name>.pfs.000` … are picked
@@ -391,11 +491,20 @@ bool ArtemisRuntime::Open(const std::string& game_path, std::string* error) {
   // SAF-backed game paths are logical DocumentsProvider paths and cannot be
   // used for writes.  Keep all saves, config and engine logs in the writable
   // app-private directory exported by engine_create; ordinary filesystem
-  // hosts retain the historical sidecar location next to the pack.
+  // hosts retain the historical sidecar location next to the pack.  Under the
+  // shared writable root each game still gets its own subdirectory — a single
+  // shared system.dat bank leaks one game's persisted config into another
+  // game's boot, and same-named slot files would collide across games.
   const char* writable_dir = std::getenv("KRKR_FILES_DIR");
-  s.save_dir = (writable_dir != nullptr && writable_dir[0] != '\0')
-                   ? writable_dir
-                   : DirName(pack_path);
+  if (writable_dir != nullptr && writable_dir[0] != '\0') {
+    s.save_dir = PerGameSaveDir(writable_dir, DirName(pack_path));
+    MakeDirs(s.save_dir);
+    SeedSaveDirFromGameDir(s.save_dir, DirName(pack_path),
+                           [&s](const std::string& m) { s.Log(m); });
+  } else {
+    s.save_dir = DirName(pack_path);
+  }
+  s.Log("artemis: save dir: " + s.save_dir);
   s.Log("artemis: pack chain base: " + pack_path);
 
   s.engine = std::make_unique<artc::EngineContext>();
