@@ -2,6 +2,7 @@
 #ifndef __GRAPHICS_LOAD_THREAD_H__
 #define __GRAPHICS_LOAD_THREAD_H__
 
+#include <chrono>
 #include <queue>
 #include <vector>
 #include "ThreadIntf.h"
@@ -24,6 +25,8 @@ struct tTVPImageLoadCommand {
     ttstr path_;
     tTVPTmpBitmapImage *dest_;
     ttstr result_;
+    // 読込み要求を発行した時刻(キュー滞留時間の計測用)
+    std::chrono::steady_clock::time_point enqueued_;
     tTVPImageLoadCommand();
     ~tTVPImageLoadCommand();
 };

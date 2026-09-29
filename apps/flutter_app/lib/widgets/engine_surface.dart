@@ -93,6 +93,7 @@ class EngineSurfaceState extends State<EngineSurface> {
   bool _pointerMoveFlushScheduled = false;
   bool _renderTargetsReleased = false;
   Future<void>? _renderTargetReleaseFuture;
+  Future<void> _surfaceSizeUpdate = Future<void>.value();
 
   @override
   void initState() {
@@ -143,7 +144,11 @@ class EngineSurfaceState extends State<EngineSurface> {
     if (ongoing != null) return ongoing;
     _renderTargetsReleased = true;
     _vsyncScheduled = false;
-    return _renderTargetReleaseFuture = _disposeAllTextures();
+    // Creation may still own a platform request even before it has a texture
+    // ID. Drain it before releasing resources or letting the next game attach.
+    return _renderTargetReleaseFuture = _surfaceSizeUpdate.whenComplete(
+      _disposeAllTextures,
+    );
   }
 
   void _reconcilePolling() {
@@ -184,8 +189,20 @@ class EngineSurfaceState extends State<EngineSurface> {
   Future<void> pollFrame({bool? rendered}) =>
       _pollFrame(externalRendered: rendered);
 
-  Future<void> _ensureSurfaceSize(Size size, double devicePixelRatio) async {
-    if (!widget.active || _renderTargetsReleased) {
+  Future<void> _ensureSurfaceSize(Size size, double devicePixelRatio) {
+    // Keep the engine size, native buffer size and attachment metadata in one
+    // transaction. Orientation can change while a platform create/resize is
+    // pending; overwriting _surfaceWidth/Height then would attach a portrait
+    // buffer as landscape and incorrectly skip the subsequent resize.
+    return _surfaceSizeUpdate = _surfaceSizeUpdate
+        .then((_) => _applySurfaceSize(size, devicePixelRatio))
+        .catchError((Object error) {
+          _reportError('surface resize failed: $error');
+        });
+  }
+
+  Future<void> _applySurfaceSize(Size size, double devicePixelRatio) async {
+    if (!mounted || !widget.active || _renderTargetsReleased) {
       return;
     }
     _devicePixelRatio = devicePixelRatio <= 0 ? 1.0 : devicePixelRatio;
@@ -302,7 +319,14 @@ class EngineSurfaceState extends State<EngineSurface> {
         height: _surfaceHeight,
       );
 
-      if (!mounted) return;
+      if (!mounted || _renderTargetsReleased) {
+        if (result != null) {
+          await widget.bridge.disposeIOSurfaceTexture(
+            textureId: result['textureId'] as int,
+          );
+        }
+        return;
+      }
       if (result == null) {
         widget.onLog?.call(
           'IOSurface texture unavailable, falling back to legacy texture mode',
@@ -334,14 +358,21 @@ class EngineSurfaceState extends State<EngineSurface> {
       }
 
       final ui.Image? previousImage = _frameImage;
-      setState(() {
+      void publishTexture() {
         _ioSurfaceTextureId = textureId;
         _ioSurfaceId = ioSurfaceId;
         _textureId = null; // Dispose legacy texture if any
         _frameImage = null;
         _frameWidth = _surfaceWidth;
         _frameHeight = _surfaceHeight;
-      });
+      }
+
+      if (mounted) {
+        setState(publishTexture);
+      } else {
+        // releaseRenderTargets waits for this operation and will detach it.
+        publishTexture();
+      }
       previousImage?.dispose();
       widget.onLog?.call(
         'IOSurface zero-copy mode enabled (textureId=$textureId, iosurface=$ioSurfaceId)',
@@ -420,7 +451,14 @@ class EngineSurfaceState extends State<EngineSurface> {
         height: _surfaceHeight,
       );
 
-      if (!mounted) return;
+      if (!mounted || _renderTargetsReleased) {
+        if (result != null) {
+          await widget.bridge.disposeSurfaceTexture(
+            textureId: result['textureId'] as int,
+          );
+        }
+        return;
+      }
       if (result == null) {
         widget.onLog?.call(
           'SurfaceTexture unavailable, falling back to legacy texture mode',
@@ -474,13 +512,19 @@ class EngineSurfaceState extends State<EngineSurface> {
       // and attach it as the EGL WindowSurface render target.
 
       final ui.Image? previousImage = _frameImage;
-      setState(() {
+      void publishTexture() {
         _surfaceTextureId = textureId;
         _textureId = null; // Dispose legacy texture if any
         _frameImage = null;
         _frameWidth = _surfaceWidth;
         _frameHeight = _surfaceHeight;
-      });
+      }
+
+      if (mounted) {
+        setState(publishTexture);
+      } else {
+        publishTexture();
+      }
       previousImage?.dispose();
       widget.onLog?.call(
         'SurfaceTexture zero-copy mode enabled (textureId=$textureId)',

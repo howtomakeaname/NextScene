@@ -18,6 +18,10 @@
 #include <sys/time.h>
 #include <sys/sysinfo.h>
 
+#include <dlfcn.h>
+#include <malloc.h>
+
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -27,6 +31,7 @@
 #include "Platform.h"
 #include "StorageImpl.h"
 #include "SysInitImpl.h"
+#include "posix_memstat.h"
 
 #include "krkr_egl_context.h"
 
@@ -100,11 +105,87 @@ tjs_int TVPGetSelfUsedMemory() {
     return (resident_pages * sysconf(_SC_PAGESIZE)) / (1024 * 1024); // MB RSS
 }
 
+// --- native heap introspection ------------------------------------------
+// OHOS musl exposes mallinfo/mallinfo2 only from API 20, and the production
+// allocator is jemalloc behind the mallopt dfx interface, so resolve the
+// symbol at runtime and treat "absent or all-zero" as unknown (-1) rather
+// than trusting a zero report.
+namespace {
+
+struct OhosMallinfo2 { // mirrors musl struct mallinfo2 (size_t fields)
+    size_t arena, ordblks, smblks, hblks, hblkhd;
+    size_t usmblks, fsmblks, uordblks, fordblks, keepcost;
+};
+
+using OhosMallinfo2Fn = OhosMallinfo2 (*)();
+
+OhosMallinfo2Fn Mallinfo2Entry() {
+    static OhosMallinfo2Fn fn = reinterpret_cast<OhosMallinfo2Fn>(
+        dlsym(RTLD_DEFAULT, "mallinfo2"));
+    return fn;
+}
+
+} // namespace
+
+TVPNativeHeapStats TVPGetNativeHeapStats() {
+    TVPNativeHeapStats out{ -1, -1 };
+    OhosMallinfo2Fn mi2 = Mallinfo2Entry();
+    if(mi2 == nullptr)
+        return out;
+    const OhosMallinfo2 mi = mi2();
+    if(mi.uordblks == 0 && mi.arena == 0 && mi.hblkhd == 0)
+        return out; // dfx interface present but not backed by the allocator
+    out.in_use_mb = static_cast<tjs_int>(mi.uordblks / (1024ULL * 1024ULL));
+    out.mapped_mb =
+        static_cast<tjs_int>((mi.arena + mi.hblkhd) / (1024ULL * 1024ULL));
+    return out;
+}
+
+void TVPPurgeNativeHeapForHost() {
+    // OHOS has no malloc_trim; the documented closest equivalents are the
+    // musl-compat mallopt knobs. M_FLUSH_THREAD_CACHE drops the calling
+    // thread's jemalloc cache — on the teardown path the engine's big frees
+    // happened on this same thread, so this is where retention unwinds.
+    mallopt(M_FLUSH_THREAD_CACHE, 0);
+}
+
+void TVPDropSystemFontPagesForHost() {
+    // The memory governor tracks RSS; ~500MB of it after a few game
+    // sessions turned out to be the platform text stack's read-only mmaps
+    // of /system/fonts (same 20MB font resident two dozen times), which
+    // pushed session starts into kernel direct-reclaim stalls. The engine
+    // itself loads fonts via heap-backed streams — these mappings are not
+    // ours to unmap, but their pages are clean file pages, so dropping
+    // them is free.
+    unsigned long mappings = 0;
+    const unsigned long dropped_kb = TVPDropSystemFontPages(&mappings);
+    spdlog::info("dropped {}MB resident font pages ({} system-font mappings)",
+                 dropped_kb / 1024, mappings);
+}
+
+void TVPLogNativeMemoryBreakdown(const char *tag) {
+    char detail[192] = "";
+    OhosMallinfo2Fn mi2 = Mallinfo2Entry();
+    if(mi2 != nullptr) {
+        const OhosMallinfo2 mi = mi2();
+        snprintf(detail, sizeof(detail),
+                 "mi2 uord=%zu ford=%zu arena=%zu hblkhd=%zu keep=%zu",
+                 mi.uordblks, mi.fordblks, mi.arena, mi.hblkhd, mi.keepcost);
+    }
+    TVPLogPosixMemoryBreakdown(tag, TVPGetNativeHeapStats(), detail);
+}
+
 std::string TVPGetPackageVersionString() { return "ohos"; }
 
 bool TVPCheckStartupPath(const std::string &path) { return true; }
 
 void TVPControlAdDialog(int adType, int arg1, int arg2) {}
+
+// Present-path diagnostics: eglSwapBuffers outcome counters, reset and
+// printed by the engine_tick perf report. Relaxed atomics — diagnostics
+// only; TVPForceSwapBuffer runs on the tick thread.
+std::atomic<uint64_t> g_perf_swap_ok{0};
+std::atomic<uint64_t> g_perf_swap_fail{0};
 
 void TVPForceSwapBuffer() {
     // Same semantics as android/AndroidUtils.cpp: only swap when an
@@ -122,11 +203,16 @@ void TVPForceSwapBuffer() {
         const EGLBoolean ok =
             eglSwapBuffers(egl.GetDisplay(), egl.GetWindowSurface());
         if (ok != EGL_TRUE) {
-            OHOSLog(LOG_WARN,
-                    (std::string("TVPForceSwapBuffer: eglSwapBuffers failed "
-                                 "err=0x") +
-                     std::to_string(static_cast<int>(eglGetError())))
-                        .c_str());
+            g_perf_swap_fail.fetch_add(1, std::memory_order_relaxed);
+            const std::string msg =
+                "TVPForceSwapBuffer: eglSwapBuffers failed err=0x" +
+                std::to_string(static_cast<int>(eglGetError()));
+            // Mirror to the engine log — hilog's ring buffer may already
+            // have rotated past the window being diagnosed.
+            spdlog::warn(msg);
+            OHOSLog(LOG_WARN, msg.c_str());
+        } else {
+            g_perf_swap_ok.fetch_add(1, std::memory_order_relaxed);
         }
     }
     // In Pbuffer mode, swap is a no-op — engine_tick handles readback.

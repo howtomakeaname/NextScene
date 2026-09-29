@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdarg>
+#include <cstdio>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -50,6 +51,7 @@ static constexpr unsigned int kEngineApiHilogDomain = 0x0206;
 #include "environ/MainScene.h"
 #include "base/StorageIntf.h"
 #include "base/ScriptMgnIntf.h"
+#include "base/XP3Archive.h"
 #include "base/SysInitIntf.h"
 #include "base/impl/SysInitImpl.h"
 #include "visual/GraphicsLoaderIntf.h"
@@ -75,8 +77,24 @@ int TVPDrawSceneOnce(int interval);
 void TVPGetBlitPerf(uint64_t &calls, uint64_t &skipped, uint64_t &compare_us,
                     uint64_t &gl_us);
 
+// Fetch-and-clear frame-content probe (ui_stubs.cpp); false when no blit
+// ran since the previous call.
+bool TVPGetFrameProbe(uint64_t &n, uint64_t &lit, uint64_t &mean_r,
+                      uint64_t &mean_g, uint64_t &mean_b);
+
 extern "C" void TVPRegisterKrkrGLESPluginAnchor();
 extern "C" void TVPRegisterKrkrLive2DPluginAnchor();
+
+// A re-attached render target gets this many forced re-present ticks in
+// engine_tick. The embedder's buffer-queue geometry can land a few frames
+// after the attach call returns; one forced present could capture a stale
+// buffer. Mirrors kRenderTargetGraceFrames in ui_stubs.cpp.
+static constexpr int kRenderTargetRepresentTicks = 5;
+
+// Set once per session by engine_open_game; engine_tick's perf report dumps
+// the primary layer structure at the first fully-idle report window, then
+// latches this true.
+static bool s_layer_dump_done = false;
 
 struct engine_handle_s {
   std::recursive_mutex mutex;
@@ -139,6 +157,10 @@ struct engine_handle_s {
     krkr::AngleBackend angle_backend = krkr::AngleBackend::OpenGLES;
     bool iosurface_attached = false;
     bool native_window_attached = false;
+    // Render-target generation last observed by engine_tick, and how many
+    // forced re-present ticks remain for it (see engine_tick).
+    uint64_t seen_target_gen = 0;
+    int represent_ticks = 0;
   } render;
 
   struct StartupState {
@@ -181,6 +203,15 @@ void AndroidInfoLog(const char* fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, args);
   va_end(args);
   OH_LOG_Print(LOG_APP, LOG_INFO, 0x0206, "krkr2", "%{public}s", buf);
+}
+#else
+void AndroidInfoLog(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  std::vfprintf(stderr, "krkr2: ");
+  std::vfprintf(stderr, fmt, args);
+  std::fprintf(stderr, "\n");
+  va_end(args);
 }
 #endif
 
@@ -705,6 +736,16 @@ engine_result_t OpenGameCore(engine_handle_t handle,
 #endif
   spdlog::default_logger()->flush();
 
+  // Session-start snapshot: if the previous teardown returned memory this
+  // reads near-fresh RSS; if it did not, the new session starts at the
+  // previous peak and entry-time resource loading stalls (root cause of the
+  // same-process second-entry black screen).
+  TVPLogNativeMemoryBreakdown("session_start");
+  // Re-arm the one-shot idle layer-structure dump (engine_tick) so every
+  // session — not only the first of the process — gets its steady-state
+  // layer tree logged.
+  s_layer_dump_done = false;
+
   try {
     spdlog::debug("engine_open_game: calling Application->StartApplication...");
 #if defined(__ANDROID__)
@@ -1179,7 +1220,18 @@ engine_result_t engine_destroy(engine_handle_t handle) {
     // release every project-owned object before mounting another game.
     // TVPSystemUninit is deliberately not called here: it consumes the
     // one-shot at-exit registry and cannot be followed by a second project.
-    spdlog::info("engine_destroy: resetting KiriKiri project runtime");
+    AndroidInfoLog("engine_destroy: resetting KiriKiri project runtime");
+    // Teardown RSS ladder: each step logs RSS so the on-device log shows
+    // exactly which stage fails to hand memory back (the same-process
+    // second-session entry stall was caused by ~3.7GB surviving this path).
+    // spdlog, not AndroidInfoLog: only spdlog lines are mirrored into
+    // krkr2-engine.log on OHOS; hilog alone rotates too fast for forensics.
+    const auto logTeardownStep = [](const char* step) {
+      spdlog::info("engine_destroy[{}]: rss={}MB free={}MB", step,
+                   TVPGetSelfUsedMemory(), TVPGetSystemFreeMemory());
+    };
+    logTeardownStep("start");
+    TVPLogNativeMemoryBreakdown("destroy_start");
     auto& egl = krkr::GetEngineEGLContext();
     if (egl.IsValid()) {
       try {
@@ -1196,22 +1248,31 @@ engine_result_t engine_destroy(engine_handle_t handle) {
       Application->OnExit();
     } catch (...) {
     }
+    logTeardownStep("app_exit");
     try {
       TVPResetScriptEngineForHost();
     } catch (...) {
     }
+    logTeardownStep("script_reset");
     try {
+      // XP3 segment cache first: its entries keep archive files mmapped, and
+      // those file-backed pages otherwise survive the teardown in RSS (the
+      // same-process switch-game cycle measured ~280MB retained this way).
+      TVPClearXP3SegmentCache();
       TVPClearGraphicCache();
       TVPResetStorageForHost();
       TVPResetAutoMountPathsForHost();
     } catch (...) {
     }
+    logTeardownStep("caches_reset");
 
     TVPMainScene::DestroyInstance();
     EngineLoop::DestroyInstance();
+    logTeardownStep("scene_loop_destroyed");
 
     delete Application;
     Application = new tTVPApplication();
+    logTeardownStep("app_recreated");
 
     TVPResetProgramArgumentsAndDataPathForHost();
     TVPProjectDir = ttstr();
@@ -1231,7 +1292,18 @@ engine_result_t engine_destroy(engine_handle_t handle) {
     if (egl.IsValid()) {
       egl.ReleaseCurrent();
     }
-    spdlog::info("engine_destroy: KiriKiri project runtime reset complete");
+    // The heavy frees above happened on this thread; drop its allocator
+    // caches so the released pages actually leave RSS before the next
+    // session starts. Log the breakdown once more to confirm it worked.
+    TVPPurgeNativeHeapForHost();
+    logTeardownStep("heap_purged");
+    // The platform text stack's font mmaps are not the engine's, but their
+    // resident pages count against the same memory governor that throttles
+    // the next session's startup; drop them now.
+    TVPDropSystemFontPagesForHost();
+    logTeardownStep("font_pages_dropped");
+    TVPLogNativeMemoryBreakdown("destroy_end");
+    AndroidInfoLog("engine_destroy: KiriKiri project runtime reset complete");
   }
 
   delete impl;
@@ -1779,6 +1851,34 @@ engine_result_t engine_tick(engine_handle_t handle, uint32_t delta_ms) {
     ::Application->Run();
   }
   const auto perf_run_t1 = std::chrono::steady_clock::now();
+
+  // Re-present after a render-target change. A static scene (title screen
+  // with no animation) never invalidates its layers, so Run() delivers no
+  // tTVPWinUpdateEvent and BasicDrawDevice::Show() → UpdateDrawBuffer()
+  // never run. After the host re-attaches the native window (orientation
+  // change destroys/recreates the EGL window surface), the new surface's
+  // buffer queue then receives no frames at all: Flutter keeps showing
+  // the stale buffer (stretched) or goes black once the queue resize
+  // releases it. Drive Show() directly for a few ticks after the target
+  // generation changes — the generation check inside
+  // FlutterWindowLayer::UpdateDrawBuffer forces a full blit +
+  // MarkFrameDirty, and TVPDrawSceneOnce() below swaps it into the new
+  // queue.
+  {
+    auto& egl = krkr::GetEngineEGLContext();
+    if (egl.IsValid() && egl.HasNativeWindow()) {
+      const uint64_t gen = egl.GetRenderTargetGeneration();
+      if (gen != impl->render.seen_target_gen) {
+        impl->render.seen_target_gen = gen;
+        impl->render.represent_ticks = kRenderTargetRepresentTicks;
+      }
+      if (impl->render.represent_ticks > 0 && ::TVPMainWindow) {
+        --impl->render.represent_ticks;
+        ::TVPMainWindow->DeliverDrawDeviceShow();
+      }
+    }
+  }
+
   ::TVPDrawSceneOnce(0);
 
   // Process deferred texture deletions. iTVPTexture2D::Release() uses
@@ -1885,6 +1985,21 @@ engine_result_t engine_tick(engine_handle_t handle, uint32_t delta_ms) {
     }
     uint64_t ub_calls = 0, ub_skipped = 0, ub_cmp_us = 0, ub_gl_us = 0;
     TVPGetBlitPerf(ub_calls, ub_skipped, ub_cmp_us, ub_gl_us);
+    // Frame-content probe (ui_stubs.cpp): color statistics of what the
+    // blit path actually presented during this span.
+    uint64_t probe_n = 0, probe_lit = 0, probe_r = 0, probe_g = 0,
+             probe_b = 0;
+    const bool probe_valid =
+        TVPGetFrameProbe(probe_n, probe_lit, probe_r, probe_g, probe_b);
+#if defined(__OHOS__)
+    // Present-path swap outcome counters (ohos/Platform.cpp,
+    // TVPForceSwapBuffer).
+    extern std::atomic<uint64_t> g_perf_swap_ok, g_perf_swap_fail;
+    const uint64_t swap_ok = g_perf_swap_ok.exchange(0);
+    const uint64_t swap_fail = g_perf_swap_fail.exchange(0);
+#else
+    const uint64_t swap_ok = 0, swap_fail = 0;
+#endif
     // Application->Run() cost breakdown (defined in Application.cpp /
     // SystemControl.cpp; relaxed atomics, diagnostics only).
     extern std::atomic<uint64_t> g_perf_msg_us, g_perf_timer_us,
@@ -1918,7 +2033,7 @@ engine_result_t engine_tick(engine_handle_t handle, uint32_t delta_ms) {
     const uint64_t max_queue = g_perf_max_queue.exchange(0);
     // One-shot layer-structure dump on the first fully-idle report window
     // (120 composes, none dirty) past the earliest boot — the steady title.
-    static bool s_layer_dump_done = false;
+    // Re-armed per session by engine_open_game.
     if (!s_layer_dump_done && runs == 120 && impl->perf.dirty == 0 &&
         impl->tick_count > 360) {
       s_layer_dump_done = true;
@@ -1935,7 +2050,8 @@ engine_result_t engine_tick(engine_handle_t handle, uint32_t delta_ms) {
     }
     spdlog::info(
         "perf: span={:.2f}s run={:.1f}ms draw={:.1f}ms read={:.1f}ms "
-        "reads={} dirty={} ub={} skip={} cmp={:.1f}ms ubgl={:.1f}ms | "
+        "reads={} dirty={} ub={} skip={} cmp={:.1f}ms ubgl={:.1f}ms "
+        "fb={} swap={}/{} | "
         "brk: msg={:.1f}ms timer={:.1f}ms watch={:.1f}ms "
         "(deliver={:.1f}ms beat={:.1f}ms gov={:.1f}ms rehash={:.1f}ms) "
         "runs={} nev={} nie={} maxq={} idle={:.1f}ms cont={:.1f}ms "
@@ -1947,7 +2063,19 @@ engine_result_t engine_tick(engine_handle_t handle, uint32_t delta_ms) {
         static_cast<unsigned long long>(impl->perf.dirty),
         static_cast<unsigned long long>(ub_calls),
         static_cast<unsigned long long>(ub_skipped), ub_cmp_us / 1000.0,
-        ub_gl_us / 1000.0, msg_us / 1000.0, timer_us / 1000.0,
+        ub_gl_us / 1000.0,
+        // fb: mean RGB + lit fraction of the presented frame ("-"
+        // when no blit ran in this span); swap: ok/fail eglSwapBuffers
+        // counts (OHOS window-surface mode).
+        probe_valid
+            ? std::to_string(probe_r) + "," + std::to_string(probe_g) + "," +
+                  std::to_string(probe_b) + "," +
+                  std::to_string(probe_n ? probe_lit * 100 / probe_n : 0) +
+                  "%"
+            : std::string("-"),
+        static_cast<unsigned long long>(swap_ok),
+        static_cast<unsigned long long>(swap_fail),
+        msg_us / 1000.0, timer_us / 1000.0,
         watch_us / 1000.0, deliver_us / 1000.0, beat_us / 1000.0,
         gov_us / 1000.0, rehash_us / 1000.0,
         static_cast<unsigned long long>(runs),
