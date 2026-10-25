@@ -973,7 +973,7 @@ void RunOpenArtemisAsync(engine_handle_s* impl, std::string game_root_path_utf8)
   std::string error;
   bool ok = false;
   try {
-    ok = impl->artemis->Open(game_root_path_utf8, &error);
+    ok = impl->artemis->Open(game_root_path_utf8, &error, impl->render.angle_backend);
   } catch (const std::exception& e) {
     error = std::string("artemis: exception during startup: ") + e.what();
   } catch (...) {
@@ -1011,6 +1011,36 @@ engine_result_t ArtemisTickLocked(engine_handle_s* impl) {
     impl->artemis->QueueInput(impl->input.pending_events.front());
     impl->input.pending_events.pop_front();
   }
+
+#if defined(__ANDROID__)
+  // The Android plugin publishes SurfaceTexture's ANativeWindow through JNI.
+  // Artemis has its own tick path, so attach it here just as the krkr2 path
+  // does below; otherwise Flutter switches to zero-copy while Artemis keeps
+  // rendering into an invisible pbuffer.
+  if (!impl->render.native_window_attached) {
+    ANativeWindow* pending_window = krkr_GetNativeWindow();
+    if (pending_window) {
+      uint32_t win_w = 0, win_h = 0;
+      krkr_GetSurfaceDimensions(&win_w, &win_h);
+      if (win_w > 0 && win_h > 0 &&
+          impl->artemis->AttachNativeWindow(pending_window, win_w, win_h)) {
+        impl->render.native_window_attached = true;
+        spdlog::info("engine_tick: auto-attached Artemis ANativeWindow {}x{}",
+                     win_w, win_h);
+      }
+      ANativeWindow_release(pending_window);
+    }
+  } else {
+    ANativeWindow* current_window = krkr_GetNativeWindow();
+    if (current_window) {
+      ANativeWindow_release(current_window);
+    } else {
+      impl->artemis->DetachNativeWindow();
+      impl->render.native_window_attached = false;
+      spdlog::info("engine_tick: Artemis ANativeWindow detached, reverted to Pbuffer mode");
+    }
+  }
+#endif
 
   // Frame rate limiting (same drift-free scheme as the krkr2 path).
   if (impl->fps.limit > 0) {
@@ -1368,7 +1398,7 @@ engine_result_t engine_open_game(engine_handle_t handle,
     std::string error;
     bool ok = false;
     try {
-      ok = impl->artemis->Open(game_root_path_utf8, &error);
+      ok = impl->artemis->Open(game_root_path_utf8, &error, impl->render.angle_backend);
     } catch (const std::exception& e) {
       error = std::string("artemis: exception during startup: ") + e.what();
     } catch (...) {
