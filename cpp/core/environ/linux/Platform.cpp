@@ -64,9 +64,11 @@ bool TVP_utime(const char *name, time_t modtime) {
     return utimes(name, mt) == 0;
 }
 
-#ifdef LINUX
+#if defined(LINUX) || defined(ANDROID)
 #include <filesystem>
+#ifdef LINUX
 #include <gtk/gtk.h>
+#endif
 #include <fstream>
 #include <Defer.h>
 #include <sys/stat.h>
@@ -79,6 +81,7 @@ bool TVP_utime(const char *name, time_t modtime) {
 
 // FIXME: 这是临时方案，以后需要重构模块化
 
+#ifdef LINUX
 tjs_int TVPGetSystemFreeMemory() {
     struct sysinfo info;
     if(sysinfo(&info) == -1) {
@@ -94,6 +97,7 @@ tjs_int TVPGetSelfUsedMemory() {
     statm >> total_pages >> resident_pages;
     return (resident_pages * sysconf(_SC_PAGESIZE)) / (1024 * 1024); // 转换为 MB
 }
+#endif
 
 // --- native heap introspection ------------------------------------------
 // This TU serves both desktop Linux (glibc) and Android (bionic, compiled
@@ -140,15 +144,19 @@ void TVPDropSystemFontPagesForHost() {
 
 void TVPLogNativeMemoryBreakdown(const char *tag) {
     char detail[160] = "";
-#if defined(__GLIBC__) && defined(__GLIBC_PREREQ) && __GLIBC_PREREQ(2, 33)
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#if __GLIBC_PREREQ(2, 33)
     struct mallinfo2 mi = mallinfo2();
     snprintf(detail, sizeof(detail),
              "mi2 uord=%zu ford=%zu arena=%zu hblkhd=%zu keep=%zu",
              mi.uordblks, mi.fordblks, mi.arena, mi.hblkhd, mi.keepcost);
 #endif
+#endif
     TVPLogPosixMemoryBreakdown(tag, TVPGetNativeHeapStats(), detail);
 }
+#endif
 
+#ifdef LINUX
 std::string TVPGetPackageVersionString() { return "linux"; }
 
 bool TVPCheckStartupPath(const std::string &path) { return true; }
