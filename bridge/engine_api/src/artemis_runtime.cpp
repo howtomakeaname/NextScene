@@ -12,6 +12,7 @@
 #include "artemis_runtime.h"
 #include "artemis_save_dir.h"
 #include "input_mapping.h"
+#include "jni/jni_util.h"
 
 #include <algorithm>
 #include <cctype>
@@ -214,6 +215,7 @@ bool LooksLikeArtemisGame(const std::string& raw_path, std::string* out_pack_pat
   } else
 #endif
   packs = ListBasePacks(path);
+  artc::jni::SortPackPaths(packs);
   if (packs.empty()) return false;
   if (out_pack_path != nullptr) *out_pack_path = packs.front();
   return true;
@@ -280,7 +282,7 @@ struct ArtemisRuntime::Impl {
     if (log) log(line);
   }
 
-  bool EnsureEgl(std::string* error);
+  bool EnsureEgl(std::string* error, krkr::AngleBackend angle_backend);
   bool MakeCurrent(std::string* error);
   bool Boot(std::string* error);
   void ReleaseLua();
@@ -303,7 +305,8 @@ ArtemisRuntime::~ArtemisRuntime() { Close(); }
 // EGL
 // ---------------------------------------------------------------------------
 
-bool ArtemisRuntime::Impl::EnsureEgl(std::string* error) {
+bool ArtemisRuntime::Impl::EnsureEgl(std::string* error,
+                                     krkr::AngleBackend angle_backend) {
   auto& egl = krkr::GetEngineEGLContext();
   const uint32_t w = static_cast<uint32_t>(stage_w);
   const uint32_t h = static_cast<uint32_t>(stage_h);
@@ -311,7 +314,7 @@ bool ArtemisRuntime::Impl::EnsureEgl(std::string* error) {
     // Nothing else owns a context (or a previous krkr2 session tore its
     // context down): create the headless pbuffer at stage resolution so
     // the RawImage readback returns the game's native frame.
-    if (!egl.Initialize(w, h)) {
+    if (!egl.Initialize(w, h, angle_backend)) {
       if (error) *error = "artemis: EGL pbuffer context initialization failed";
       return false;
     }
@@ -382,7 +385,8 @@ bool ArtemisRuntime::Impl::Boot(std::string* error) {
   return true;
 }
 
-bool ArtemisRuntime::Open(const std::string& game_path, std::string* error) {
+bool ArtemisRuntime::Open(const std::string& game_path, std::string* error,
+                          krkr::AngleBackend angle_backend) {
   Impl& s = *impl_;
   if (s.open) {
     if (error) *error = "artemis: runtime already open";
@@ -425,7 +429,7 @@ bool ArtemisRuntime::Open(const std::string& game_path, std::string* error) {
   s.stage_w = s.engine->stageW();
   s.stage_h = s.engine->stageH();
   s.Log("artemis: stage " + std::to_string(s.stage_w) + "x" + std::to_string(s.stage_h));
-  if (!s.EnsureEgl(error)) {
+  if (!s.EnsureEgl(error, angle_backend)) {
     Close();
     return false;
   }

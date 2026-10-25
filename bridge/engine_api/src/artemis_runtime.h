@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "engine_api.h"
+#include "angle_backend.h"
 
 namespace krkr2_artemis {
 
@@ -51,7 +52,8 @@ class ArtemisRuntime {
   /** Open the pack chain, read system.ini, bring up EGL + GL and run the
    *  boot chain (system/first.iet). Blocking; intended for the startup
    *  worker. `*error` is set on failure. */
-  bool Open(const std::string& game_path, std::string* error);
+  bool Open(const std::string& game_path, std::string* error,
+            krkr::AngleBackend angle_backend);
 
   enum class TickStatus { kOk, kExitRequested, kError };
 
