@@ -89,6 +89,9 @@ class ArtemisRuntime {
   bool HasNativeWindow() const;
   void UpdateNativeWindowSize(uint32_t width, uint32_t height);
 
+  /** IOSurface render-target dimensions used only for input mapping. */
+  void SetInputSurfaceSize(uint32_t width, uint32_t height);
+
   /** Human readable GL renderer string ("Artemis compat | <GL_RENDERER>"). */
   std::string RendererInfo();
 

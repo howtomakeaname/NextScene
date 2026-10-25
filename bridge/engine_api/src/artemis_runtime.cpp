@@ -10,6 +10,8 @@
  * the Dart side sees exactly the same frame contract as the krkr2 core.
  */
 #include "artemis_runtime.h"
+#include "artemis_save_dir.h"
+#include "input_mapping.h"
 
 #include <algorithm>
 #include <cctype>
@@ -78,104 +80,6 @@ std::string StripTrailingSlash(std::string p) {
 std::string DirName(const std::string& p) {
   const size_t slash = p.find_last_of("/\\");
   return slash == std::string::npos ? std::string(".") : p.substr(0, slash);
-}
-
-std::string BaseName(const std::string& p) {
-  const std::string t = StripTrailingSlash(p);
-  const size_t slash = t.find_last_of("/\\");
-  return slash == std::string::npos ? t : t.substr(slash + 1);
-}
-
-uint32_t Fn1a32(const std::string& s) {
-  uint32_t h = 2166136261u;
-  for (unsigned char c : s) { h ^= c; h *= 16777619u; }
-  return h;
-}
-
-// Every Artemis game gets its own save area under the shared writable root.
-// With one shared directory all games read and write a single system.dat
-// variable bank, so one game's persisted config (e.g. a ui_lang the other
-// game's packs don't provide) leaks into the next game's boot and can break
-// it entirely; same-named per-slot save files (save0001.dat …) would also
-// clobber each other across games.  The leaf name is the game folder plus a
-// short hash of its full path so same-named folders stay apart.
-std::string PerGameSaveDir(const std::string& writable_root,
-                           const std::string& game_dir) {
-  char suffix[9];
-  std::snprintf(suffix, sizeof(suffix), "%08x", Fn1a32(game_dir));
-  return StripTrailingSlash(writable_root) + "/artemis-saves/" +
-         BaseName(game_dir) + "-" + suffix;
-}
-
-void MakeDirs(const std::string& path) {
-  std::string cur;
-  for (size_t i = 0; i < path.size(); ++i) {
-    cur.push_back(path[i]);
-    if (path[i] == '/' && cur.size() > 1) {
-      ::mkdir(cur.c_str(), 0755);  // EEXIST is fine
-    }
-  }
-  ::mkdir(path.c_str(), 0755);
-}
-
-bool CopyFileBytes(const std::string& from, const std::string& to) {
-  FILE* in = std::fopen(from.c_str(), "rb");
-  if (in == nullptr) return false;
-  FILE* out = std::fopen(to.c_str(), "wb");
-  if (out == nullptr) { std::fclose(in); return false; }
-  char buf[65536];
-  size_t n;
-  bool ok = true;
-  while ((n = std::fread(buf, 1, sizeof(buf), in)) > 0) {
-    if (std::fwrite(buf, 1, n, out) != n) { ok = false; break; }
-  }
-  if (std::ferror(in)) ok = false;
-  std::fclose(in);
-  if (std::fclose(out) != 0) ok = false;
-  return ok;
-}
-
-// One-time seed for a fresh per-game save area: historical builds kept the
-// sidecar bank and slot files next to the pack, so pick up system.dat /
-// saveg.dat / save*.dat from the game folder when it is directly readable
-// (SAF logical paths are not).  An already-populated save area is never
-// touched.  The previous shared root is deliberately NOT seeded from: its
-// contents are an untraceable mix of every game's data.
-void SeedSaveDirFromGameDir(const std::string& save_dir,
-                            const std::string& game_dir,
-                            const std::function<void(const std::string&)>& log) {
-  if (!IsDirectory(save_dir) || !IsDirectory(game_dir)) return;
-  // Never seed over an established save area.
-  DIR* existing = ::opendir(save_dir.c_str());
-  if (existing != nullptr) {
-    while (dirent* ent = ::readdir(existing)) {
-      if (EndsWith(ToLower(ent->d_name), ".dat")) {
-        ::closedir(existing);
-        return;
-      }
-    }
-    ::closedir(existing);
-  }
-  DIR* d = ::opendir(game_dir.c_str());
-  if (d == nullptr) return;
-  int seeded = 0;
-  while (dirent* ent = ::readdir(d)) {
-    const std::string name = ent->d_name;
-    const std::string lower = ToLower(name);
-    const bool wanted = lower == "system.dat" || lower == "saveg.dat" ||
-                        (lower.rfind("save", 0) == 0 && EndsWith(lower, ".dat"));
-    if (!wanted) continue;
-    const std::string from = game_dir + "/" + name;
-    if (!IsRegularFile(from)) continue;
-    if (CopyFileBytes(from, save_dir + "/" + name)) {
-      ++seeded;
-      log("artemis: seeded save file from game dir: " + name);
-    }
-  }
-  ::closedir(d);
-  if (seeded > 0)
-    log("artemis: migrated " + std::to_string(seeded) +
-        " sidecar save file(s) into per-game save area");
 }
 
 // Base packs are `<name>.pfs`; patch volumes `<name>.pfs.000` … are picked
@@ -346,6 +250,8 @@ struct ArtemisRuntime::Impl {
   uint64_t tick_count = 0;
 
   // ---- input ----
+  uint32_t input_surface_w = 0;
+  uint32_t input_surface_h = 0;
   struct RawInput {
     bool is_key = false;
     bool is_move = false;
@@ -497,10 +403,9 @@ bool ArtemisRuntime::Open(const std::string& game_path, std::string* error) {
   // game's boot, and same-named slot files would collide across games.
   const char* writable_dir = std::getenv("KRKR_FILES_DIR");
   if (writable_dir != nullptr && writable_dir[0] != '\0') {
-    s.save_dir = PerGameSaveDir(writable_dir, DirName(pack_path));
-    MakeDirs(s.save_dir);
-    SeedSaveDirFromGameDir(s.save_dir, DirName(pack_path),
-                           [&s](const std::string& m) { s.Log(m); });
+    s.save_dir = PreparePerGameSaveDir(
+        writable_dir, DirName(pack_path),
+        [&s](const std::string& m) { s.Log(m); });
   } else {
     s.save_dir = DirName(pack_path);
   }
@@ -576,23 +481,16 @@ void ArtemisRuntime::Impl::DrainQueuedTags() {
 }
 
 void ArtemisRuntime::Impl::StageFromWindow(float wx, float wy, float* sx, float* sy) const {
-  // Pbuffer mode: the host reads the stage-sized frame back and maps
-  // pointer positions onto it itself, so coordinates arrive in stage space.
-  if (native_win_w == 0 || native_win_h == 0) {
-    *sx = wx;
-    *sy = wy;
-    return;
-  }
-  // Native window mode: letterbox the stage into the window (SIDECUT=0).
-  const float sw = static_cast<float>(native_win_w) / stage_w;
-  const float sh = static_cast<float>(native_win_h) / stage_h;
-  const float scale = sw < sh ? sw : sh;
-  const float vp_w = stage_w * scale;
-  const float vp_h = stage_h * scale;
-  const float vp_x = (native_win_w - vp_w) * 0.5f;
-  const float vp_y = (native_win_h - vp_h) * 0.5f;
-  *sx = (wx - vp_x) / vp_w * stage_w;
-  *sy = (wy - vp_y) / vp_h * stage_h;
+  // Native windows and IOSurface both deliver physical surface coordinates.
+  // Plain pbuffer readback has no host surface and already receives stage
+  // coordinates from the Flutter letterbox mapper.
+  const uint32_t surface_w = native_win_w != 0 ? native_win_w : input_surface_w;
+  const uint32_t surface_h = native_win_h != 0 ? native_win_h : input_surface_h;
+  const StagePoint point = MapWindowPointToStage(
+      wx, wy, surface_w, surface_h, static_cast<uint32_t>(stage_w),
+      static_cast<uint32_t>(stage_h));
+  *sx = point.x;
+  *sy = point.y;
 }
 
 void ArtemisRuntime::Impl::ProcessInput() {
@@ -608,7 +506,7 @@ void ArtemisRuntime::Impl::ProcessInput() {
     defer_tap_release_ = false;
     lua->PushKeyUp(kKeyTap);
     lua->SetTouchCount(0);
-    const bool was_dragging = lua->DragActive();
+    const bool was_dragging = !IsClickRelease(lua->DragActive(), lua->DragMoved());
     if (was_dragging) end_drag_pending_ = true;  // dragout after vsync
     if (!was_dragging) lua->ClickAt(defer_tap_x_, defer_tap_y_);
   }
@@ -652,7 +550,7 @@ void ArtemisRuntime::Impl::ProcessInput() {
     } else {
       lua->PushKeyUp(kKeyTap);
       touch_count = 0;
-      const bool was_dragging = lua->DragActive();
+      const bool was_dragging = !IsClickRelease(lua->DragActive(), lua->DragMoved());
       if (was_dragging) end_drag_pending_ = true;  // dragout after vsync
       if (!was_dragging) {  // a clean tap, not a drag
         tapped = true;
@@ -937,6 +835,7 @@ void ArtemisRuntime::Close() {
   }
   s.owns_egl = false;
   s.native_win_w = s.native_win_h = 0;
+  s.input_surface_w = s.input_surface_h = 0;
 }
 
 bool ArtemisRuntime::IsOpen() const { return impl_->open; }
@@ -982,6 +881,14 @@ void ArtemisRuntime::UpdateNativeWindowSize(uint32_t width, uint32_t height) {
   s.native_win_h = height;
   krkr::GetEngineEGLContext().UpdateNativeWindowSize(width, height);
   s.drawn_revision = ~0ull;
+}
+
+void ArtemisRuntime::SetInputSurfaceSize(uint32_t width, uint32_t height) {
+  Impl& s = *impl_;
+  s.input_surface_w = width;
+  s.input_surface_h = height;
+  s.Log("input surface: " + std::to_string(width) + "x" +
+        std::to_string(height));
 }
 
 std::string ArtemisRuntime::RendererInfo() {
