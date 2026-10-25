@@ -798,24 +798,29 @@ class EngineSurfaceState extends State<EngineSurface> {
     double? deltaX,
     double? deltaY,
   }) {
-    return _mapPointerEventData(EngineInputEventData(
-      type: type,
-      timestampMicros: event.timeStamp.inMicroseconds,
-      x: event.localPosition.dx,
-      y: event.localPosition.dy,
-      deltaX: deltaX ?? event.delta.dx,
-      deltaY: deltaY ?? event.delta.dy,
-      pointerId: event.pointer,
-      button: _flutterButtonsToEngineButton(event.buttons),
-    ));
+    return _mapPointerEventData(
+      EngineInputEventData(
+        type: type,
+        timestampMicros: event.timeStamp.inMicroseconds,
+        x: event.localPosition.dx,
+        y: event.localPosition.dy,
+        deltaX: deltaX ?? event.delta.dx,
+        deltaY: deltaY ?? event.delta.dy,
+        pointerId: event.pointer,
+        button: _flutterButtonsToEngineButton(event.buttons),
+      ),
+    );
   }
 
   /// Synthetic controls use the same logical viewport and letterbox mapping
   /// as direct input. Keyboard codes are already native virtual key codes.
   Future<void> sendVirtualInput(EngineInputEventData event) async {
     if (!widget.active || _renderTargetsReleased) return;
-    await _sendInputEvent(event.type <= EngineInputEventType.pointerScroll
-        ? _mapPointerEventData(event) : event);
+    await _sendInputEvent(
+      event.type <= EngineInputEventType.pointerScroll
+          ? _mapPointerEventData(event)
+          : event,
+    );
   }
 
   EngineInputEventData _mapPointerEventData(EngineInputEventData event) {
@@ -834,14 +839,12 @@ class EngineSurfaceState extends State<EngineSurface> {
     double dX = event.deltaX * dpr;
     double dY = event.deltaY * dpr;
 
-    // Software RawImage path: the displayed image is letterboxed inside the
-    // widget (RawImage fit: BoxFit.contain) while the engine keeps its frame
-    // at the game's native pixel size (e.g. 1280x720). Surface coordinates
-    // (= widget physical size) therefore do not match frame coordinates on
-    // screens with a different aspect (portrait phone showing a landscape
-    // game): a tap at widget-y 1428 lands far outside the 720-tall layer
-    // tree and every layer hit-test misses. Apply the same contain-fit
-    // math the display uses: widget px → centered frame px.
+    // Legacy Texture and RawImage readback paths: the displayed frame is
+    // letterboxed inside the widget while the engine keeps its native pixel
+    // size (e.g. 1280x720). Surface coordinates (= widget physical size)
+    // therefore do not match frame coordinates on screens with a different
+    // aspect: a tap can land outside the layer tree and every hit-test misses.
+    // Apply the same contain-fit math the display uses: widget px → frame px.
     if (_mapsPointerToFramePixels) {
       final double widgetPhysW = _lastWidgetLogicalSize.width * dpr;
       final double widgetPhysH = _lastWidgetLogicalSize.height * dpr;
@@ -876,12 +879,11 @@ class EngineSurfaceState extends State<EngineSurface> {
     );
   }
 
-  /// True when frames are shown via RawImage (software readback) and pointer
-  /// positions must be mapped from widget coordinates to native frame pixels.
+  /// True for readback frames shown via legacy Texture or RawImage. Both use
+  /// the same contain fit, so both need widget-to-frame pointer mapping.
   bool get _mapsPointerToFramePixels =>
       _ioSurfaceTextureId == null &&
       _surfaceTextureId == null &&
-      _textureId == null &&
       _frameWidth > 0 &&
       _frameHeight > 0;
 
