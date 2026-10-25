@@ -24,6 +24,7 @@ import '../services/manager_storage.dart';
 import '../services/game_directory_scanner.dart';
 import '../services/engine_runtime_guard.dart';
 import '../services/game_manager.dart';
+import '../services/runtime_switch_policy.dart';
 import '../widgets/engine_surface.dart';
 import '../ui/ui.dart';
 import '../widgets/performance_overlay.dart';
@@ -498,7 +499,7 @@ class _GamePageState extends State<GamePage> with WidgetsBindingObserver {
     if (Platform.isAndroid && !await _ensureAndroidDirectoryAccess()) return;
     if (!mounted) return;
     if (_engineConflict) {
-      if (Platform.isAndroid || Platform.operatingSystem == 'ohos') {
+      if (canReplaceParkedRuntime(Platform.operatingSystem)) {
         await _replaceParkedRuntime();
         return;
       }
