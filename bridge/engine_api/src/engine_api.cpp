@@ -208,7 +208,7 @@ void AndroidInfoLog(const char* fmt, ...) {
 void AndroidInfoLog(const char* fmt, ...) {
   va_list args;
   va_start(args, fmt);
-  std::vfprintf(stderr, "krkr2: ");
+  std::fputs("krkr2: ", stderr);
   std::vfprintf(stderr, fmt, args);
   std::fprintf(stderr, "\n");
   va_end(args);
@@ -924,6 +924,12 @@ void ArtemisLogLine(engine_handle_t handle, const std::string& line) {
 void CreateArtemisRuntimeLocked(engine_handle_t handle, engine_handle_s* impl) {
   impl->artemis = std::make_unique<krkr2_artemis::ArtemisRuntime>(
       [handle](const std::string& line) { ArtemisLogLine(handle, line); });
+  // The host may attach IOSurface before the game runtime exists. Preserve
+  // that geometry for input mapping instead of waiting for another attach.
+  if (impl->render.iosurface_attached) {
+    impl->artemis->SetInputSurfaceSize(impl->frame.surface_width,
+                                       impl->frame.surface_height);
+  }
   artc::SetLogSink([handle](int /*level*/, const std::string& msg) {
     ArtemisLogLine(handle, msg);
   });
@@ -967,7 +973,7 @@ void RunOpenArtemisAsync(engine_handle_s* impl, std::string game_root_path_utf8)
   std::string error;
   bool ok = false;
   try {
-    ok = impl->artemis->Open(game_root_path_utf8, &error);
+    ok = impl->artemis->Open(game_root_path_utf8, &error, impl->render.angle_backend);
   } catch (const std::exception& e) {
     error = std::string("artemis: exception during startup: ") + e.what();
   } catch (...) {
@@ -1005,6 +1011,36 @@ engine_result_t ArtemisTickLocked(engine_handle_s* impl) {
     impl->artemis->QueueInput(impl->input.pending_events.front());
     impl->input.pending_events.pop_front();
   }
+
+#if defined(__ANDROID__)
+  // The Android plugin publishes SurfaceTexture's ANativeWindow through JNI.
+  // Artemis has its own tick path, so attach it here just as the krkr2 path
+  // does below; otherwise Flutter switches to zero-copy while Artemis keeps
+  // rendering into an invisible pbuffer.
+  if (!impl->render.native_window_attached) {
+    ANativeWindow* pending_window = krkr_GetNativeWindow();
+    if (pending_window) {
+      uint32_t win_w = 0, win_h = 0;
+      krkr_GetSurfaceDimensions(&win_w, &win_h);
+      if (win_w > 0 && win_h > 0 &&
+          impl->artemis->AttachNativeWindow(pending_window, win_w, win_h)) {
+        impl->render.native_window_attached = true;
+        spdlog::info("engine_tick: auto-attached Artemis ANativeWindow {}x{}",
+                     win_w, win_h);
+      }
+      ANativeWindow_release(pending_window);
+    }
+  } else {
+    ANativeWindow* current_window = krkr_GetNativeWindow();
+    if (current_window) {
+      ANativeWindow_release(current_window);
+    } else {
+      impl->artemis->DetachNativeWindow();
+      impl->render.native_window_attached = false;
+      spdlog::info("engine_tick: Artemis ANativeWindow detached, reverted to Pbuffer mode");
+    }
+  }
+#endif
 
   // Frame rate limiting (same drift-free scheme as the krkr2 path).
   if (impl->fps.limit > 0) {
@@ -1362,7 +1398,7 @@ engine_result_t engine_open_game(engine_handle_t handle,
     std::string error;
     bool ok = false;
     try {
-      ok = impl->artemis->Open(game_root_path_utf8, &error);
+      ok = impl->artemis->Open(game_root_path_utf8, &error, impl->render.angle_backend);
     } catch (const std::exception& e) {
       error = std::string("artemis: exception during startup: ") + e.what();
     } catch (...) {
@@ -2384,6 +2420,9 @@ engine_result_t engine_set_surface_size(engine_handle_t handle,
 
 #if defined(ENGINE_API_USE_ARTEMIS_RUNTIME)
   if (impl->artemis) {
+    if (impl->render.iosurface_attached) {
+      impl->artemis->SetInputSurfaceSize(width, height);
+    }
     // The Artemis frame is always stage-sized; only a native window (if
     // attached) follows the host surface, the pbuffer readback does not.
     impl->artemis->UpdateNativeWindowSize(width, height);
@@ -2780,6 +2819,9 @@ engine_result_t engine_set_render_target_iosurface(engine_handle_t handle,
     // Detach — revert to Pbuffer mode
     egl.DetachIOSurface();
     impl->render.iosurface_attached = false;
+#if defined(ENGINE_API_USE_ARTEMIS_RUNTIME)
+    if (impl->artemis) impl->artemis->SetInputSurfaceSize(0, 0);
+#endif
     spdlog::info("engine_set_render_target_iosurface: detached, Pbuffer mode");
   } else {
     if (width == 0 || height == 0) {
@@ -2795,6 +2837,9 @@ engine_result_t engine_set_render_target_iosurface(engine_handle_t handle,
           "failed to attach IOSurface as render target");
     }
     impl->render.iosurface_attached = true;
+#if defined(ENGINE_API_USE_ARTEMIS_RUNTIME)
+    if (impl->artemis) impl->artemis->SetInputSurfaceSize(width, height);
+#endif
     spdlog::info("engine_set_render_target_iosurface: attached id={} {}x{}",
                  iosurface_id, width, height);
 

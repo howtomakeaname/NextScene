@@ -31,6 +31,19 @@ class _Bridge implements EngineBridge {
     pixels: Uint8List.fromList(List.filled(32, 255)),
   );
   @override
+  Future<int> createTexture({required int width, required int height}) async =>
+      1;
+  @override
+  Future<bool> updateTextureRgba({
+    required int textureId,
+    required Uint8List rgba,
+    required int width,
+    required int height,
+    required int rowBytes,
+  }) async => true;
+  @override
+  Future<void> disposeTexture({required int textureId}) async {}
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
@@ -96,4 +109,36 @@ void main() {
       expect(bridge.events.length, count);
     },
   );
+
+  testWidgets('legacy texture uses the same frame letterbox mapping', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 1200);
+    tester.view.devicePixelRatio = 2;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _Bridge();
+    final key = GlobalKey<EngineSurfaceState>();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: UiTheme.dark(),
+        home: Scaffold(
+          body: EngineSurface(
+            key: key,
+            bridge: bridge,
+            active: true,
+            externalTickDriven: true,
+            surfaceMode: EngineSurfaceMode.texture,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.runAsync(() => key.currentState!.pollFrame());
+    await tester.pump();
+    await tester.tapAt(const Offset(100, 250));
+    await tester.pump();
+    expect((bridge.events.last.x, bridge.events.last.y), (1, 0.5));
+    await key.currentState!.releaseRenderTargets();
+  });
 }
