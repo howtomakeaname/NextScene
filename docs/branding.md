@@ -22,7 +22,7 @@ python3 generate_icons.py --platform shared --platform ohos
 | --- | --- |
 | Flutter「关于」页 | `assets/branding/app_icon.png` 与 `app_icon_ohos.png`，均为 512px |
 | HarmonyOS | AppScope、entry、ohosTest 三处 PNG，源资源均为 1024px、不透明 |
-| 商店素材 | `doc/store/app_icon_1024.png`，1024px、不透明 |
+| 商店素材 | `docs/store/app_icon_1024.png`，1024px、不透明 |
 | Android | 五档密度的 legacy 与 adaptive 图标，以及背景色资源 |
 | iOS | 按现有 AppIcon 的 `Contents.json` 输出尺寸；RGB 方形，由系统裁切 |
 | macOS | 按现有 AppIcon 目录输出尺寸；沿用圆角蒙版和桌面留白，同时更新原生入口的 ICNS |

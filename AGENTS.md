@@ -34,7 +34,7 @@
   assertions or silently select headless/audio-null backends to make production
   builds pass.
 
-The implementation plan and evidence are in `doc/artemis-embedding-work.md`.
+The implementation plan and evidence are in `docs/artemis-embedding-work.md`.
 
 ## Android storage
 

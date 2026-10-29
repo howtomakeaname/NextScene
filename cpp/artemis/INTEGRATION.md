@@ -38,7 +38,7 @@ ctest --test-dir build/artemis-tests --output-on-failure
 ```
 
 Upstream `docs/embedding.md` documents backends, Android exports and lifecycle.
-`doc/artemis-embedding-work.md` records this migration's validation and limits.
+`docs/artemis-embedding-work.md` records this migration's validation and limits.
 The application still enables Artemis by default only on OHOS. Android and iOS
 require their own host validation; iOS audio and asynchronous Flutter dialogs
 remain separate feature work.
